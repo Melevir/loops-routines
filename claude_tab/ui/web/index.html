@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude_tab</title>
+<style>
+:root {
+  --bg: #f6f5f2; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6a66; --line: #e3e1dc;
+  --accent: #c2603d; --accent-soft: #f6e4dc; --ok: #2f7d4f; --ok-soft: #e0f0e6; --warn: #a66a00;
+  --warn-soft: #fbefd6; --bad: #b3261e; --bad-soft: #f9e0de; --run: #2463b5; --run-soft: #e1ebf8;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1a18; --panel: #252421; --text: #ecebe7; --muted: #9c9a94; --line: #3a3834;
+    --accent: #e08a68; --accent-soft: #3d2a22; --ok: #6cc28f; --ok-soft: #1f3327; --warn: #e3b252;
+    --warn-soft: #3a2f17; --bad: #f08a80; --bad-soft: #3d2120; --run: #79a8ec; --run-soft: #1f2c40;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+button { font: inherit; color: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel);
+  border-radius: 7px; padding: 4px 10px; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+a { color: var(--accent); }
+header { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 12px 16px 8px;
+  border-bottom: 1px solid var(--line); }
+.top { display: flex; align-items: center; gap: 8px; }
+.top h1 { font-size: 15px; margin: 0; flex: 1; letter-spacing: .2px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; }
+.dot.on { background: var(--ok); } .dot.off { background: var(--bad); }
+.usage { display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; margin-top: 10px; align-items: end; }
+.meter .label { display: flex; justify-content: space-between; color: var(--muted); font-size: 11.5px; }
+.bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 3px; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+.tabs { display: flex; gap: 4px; margin-top: 10px; }
+.tabs button { border: none; background: transparent; padding: 4px 10px; border-radius: 6px; color: var(--muted); }
+.tabs button.on { background: var(--panel); color: var(--text); box-shadow: 0 0 0 1px var(--line); }
+.badge-count { background: var(--bad); color: #fff; border-radius: 8px; padding: 0 6px; font-size: 11px; margin-left: 4px; }
+main { padding: 12px 16px 24px; max-width: 900px; margin: 0 auto; }
+.notice { background: var(--warn-soft); color: var(--warn); border-radius: 8px; padding: 8px 10px; margin-bottom: 10px; }
+.notice.bad { background: var(--bad-soft); color: var(--bad); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+.card.click { cursor: pointer; } .card.click:hover { border-color: var(--muted); }
+.row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.grow { flex: 1; min-width: 0; }
+.title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.muted { color: var(--muted); } .small { font-size: 11.5px; }
+.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip { display: inline-flex; align-items: center; gap: 4px; border-radius: 10px; padding: 1px 8px; font-size: 11.5px;
+  white-space: nowrap; background: var(--line); color: var(--muted); }
+.chip.running { background: var(--run-soft); color: var(--run); }
+.chip.waiting { background: var(--warn-soft); color: var(--warn); }
+.chip.ok, .chip.nothing { background: var(--ok-soft); color: var(--ok); }
+.chip.alert, .chip.broken, .chip.failed, .chip.timeout, .chip.lost, .chip.blocker { background: var(--bad-soft); color: var(--bad); }
+.chip.skipped, .chip.disabled, .chip.stopped, .chip.unknown { background: var(--line); color: var(--muted); }
+.spin { width: 9px; height: 9px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: spin .8s linear infinite; display: inline-block; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.switch { position: relative; width: 30px; height: 18px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span { position: absolute; inset: 0; background: var(--line); border-radius: 9px; transition: .15s; cursor: pointer; }
+.switch span::after { content: ""; position: absolute; width: 14px; height: 14px; left: 2px; top: 2px; border-radius: 50%;
+  background: #fff; transition: .15s; }
+.switch input:checked + span { background: var(--ok); }
+.switch input:checked + span::after { transform: translateX(12px); }
+.line2 { margin-top: 4px; }
+.back { margin-bottom: 10px; }
+dl.props { display: grid; grid-template-columns: max-content 1fr; gap: 3px 12px; margin: 8px 0 0; font-size: 12px; }
+dl.props dt { color: var(--muted); } dl.props dd { margin: 0; overflow-wrap: anywhere; }
+.report { overflow-wrap: anywhere; }
+.report h1, .report h2, .report h3 { font-size: 14px; margin: 14px 0 6px; }
+.report pre, pre.log { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+  overflow: auto; font: 11.5px/1.45 var(--mono); white-space: pre-wrap; word-break: break-word; }
+pre.log { max-height: 340px; }
+.report code { font-family: var(--mono); font-size: 12px; background: var(--bg); padding: 0 3px; border-radius: 4px; }
+.report table { border-collapse: collapse; } .report td, .report th { border: 1px solid var(--line); padding: 3px 6px; }
+.msg { display: flex; gap: 8px; padding: 4px 0; border-top: 1px solid var(--line); }
+.msg:first-child { border-top: none; }
+.composer { display: flex; gap: 6px; margin-top: 8px; }
+.composer input { flex: 1; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line);
+  border-radius: 7px; padding: 5px 8px; min-width: 0; }
+h2.section { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 16px 0 6px; }
+.empty { color: var(--muted); text-align: center; padding: 30px 0; }
+.toast { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); background: var(--text); color: var(--bg);
+  padding: 7px 12px; border-radius: 8px; max-width: 90%; z-index: 5; }
+@media (max-width: 520px) { .usage { grid-template-columns: 1fr 1fr; } .usage .probe { grid-column: span 2; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="top">
+    <span class="dot" id="conn" title="connection to the daemon"></span>
+    <h1>claude_tab</h1>
+    <span class="muted small" id="slots"></span>
+  </div>
+  <div class="usage" id="usage"></div>
+  <div class="tabs" id="tabs">
+    <button data-tab="routines" class="on">Routines</button>
+    <button data-tab="activity">Activity <span id="alerts"></span></button>
+  </div>
+</header>
+<main id="main"><div class="empty">Connecting…</div></main>
+<div id="toast" class="toast" hidden></div>
+<script>
+"use strict";
+// ---- token: from the URL fragment (#token=...), kept for this tab only ----
+const hashToken = new URLSearchParams(location.hash.slice(1)).get("token");
+if (hashToken) { try { sessionStorage.setItem("ct-token", hashToken); } catch (e) {} history.replaceState(null, "", location.pathname); }
+let TOKEN = hashToken;
+try { TOKEN = TOKEN || sessionStorage.getItem("ct-token"); } catch (e) {}
+window.addEventListener("hashchange", () => {  // the same page opened again with a (new) token
+  const token = new URLSearchParams(location.hash.slice(1)).get("token");
+  if (!token) return;
+  try { sessionStorage.setItem("ct-token", token); } catch (e) {}
+  location.replace(location.pathname);
+});
+
+const state = { tab: "routines", view: null, summary: null, detail: null, run: null, log: "", connected: false };
+const $ = (sel) => document.querySelector(sel);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(path, options = {}) {
+  const response = await fetch(path, { ...options, headers: { "Authorization": `Bearer ${TOKEN}`,
+    "Content-Type": "application/json", ...(options.headers || {}) } });
+  const type = response.headers.get("content-type") || "";
+  const body = type.includes("json") ? await response.json() : await response.text();
+  if (!response.ok) { const error = new Error(body.error || body || response.statusText); error.status = response.status; throw error; }
+  return body;
+}
+const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+
+function toast(text) {
+  const el = $("#toast"); el.textContent = text; el.hidden = false;
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => (el.hidden = true), 4000);
+}
+
+// ---- time ----
+function relative(iso) {
+  if (!iso) return "–";
+  const diff = (new Date(iso) - new Date()) / 60000, abs = Math.abs(diff);
+  const rel = abs < 1 ? "now" : abs < 60 ? `${Math.round(abs)}m` : abs < 48 * 60 ? `${Math.floor(abs / 60)}h${String(Math.round(abs % 60)).padStart(2, "0")}m` : `${Math.round(abs / 1440)}d`;
+  return rel === "now" ? "now" : diff > 0 ? `in ${rel}` : `${rel} ago`;
+}
+function when(iso) {
+  return iso ? `<span title="${esc(new Date(iso).toLocaleString())}">${relative(iso)}</span>` : "–";
+}
+const clockTime = (iso) => iso ? new Date(iso).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : "–";
+
+// ---- markdown (small, safe: HTML is escaped first, links are http(s) only) ----
+function markdown(text) {
+  const blocks = String(text || "").replace(/\r/g, "").split(/\n```/);
+  let html = "";
+  blocks.forEach((block, i) => {
+    if (i % 2 === 1) { const body = block.replace(/^[^\n]*\n/, ""); html += `<pre>${esc(body)}</pre>`; return; }
+    const lines = block.split("\n"); let list = null, para = [], table = [];
+    const inline = (s) => esc(s)
+      .replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+      .replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, '$1<a href="$2" target="_blank" rel="noopener">$2</a>');
+    const flush = () => {
+      if (para.length) { html += `<p>${inline(para.join(" "))}</p>`; para = []; }
+      if (list) { html += `<${list.type}>${list.items.map((x) => `<li>${inline(x)}</li>`).join("")}</${list.type}>`; list = null; }
+      if (table.length) {
+        const rows = table.filter((r) => !/^\s*\|?\s*:?-{2,}/.test(r)).map((r) => r.trim().replace(/^\||\|$/g, "").split("|"));
+        html += `<table>${rows.map((cells, n) => `<tr>${cells.map((c) => n ? `<td>${inline(c.trim())}</td>` : `<th>${inline(c.trim())}</th>`).join("")}</tr>`).join("")}</table>`;
+        table = [];
+      }
+    };
+    for (const line of lines) {
+      let m;
+      if (!line.trim()) { flush(); continue; }
+      if ((m = line.match(/^(#{1,4})\s+(.*)/))) { flush(); html += `<h3>${inline(m[2])}</h3>`; continue; }
+      if (/^\s*\|.*\|\s*$/.test(line)) { if (para.length || list) flush(); table.push(line); continue; }
+      if ((m = line.match(/^\s*[-*+]\s+(.*)/)) || (m = line.match(/^\s*\d+[.)]\s+(.*)/))) {
+        const type = /^\s*\d/.test(line) ? "ol" : "ul";
+        if (para.length || table.length || (list && list.type !== type)) flush();
+        list = list || { type, items: [] }; list.items.push(m[1]); continue;
+      }
+      if (list && /^\s{2,}/.test(line)) { list.items[list.items.length - 1] += " " + line.trim(); continue; }
+      if (list || table.length) flush();
+      para.push(line.trim());
+    }
+    flush();
+  });
+  return html;
+}
+
+// ---- pieces ----
+function stateChip(r) {
+  if (r.state === "running") return `<span class="chip running"><span class="spin"></span>running</span>`;
+  return `<span class="chip ${esc(r.state)}">${esc(r.state)}</span>`;
+}
+function resultChip(run) {
+  if (!run) return "";
+  if (run.state === "skipped") return `<span class="chip skipped">skipped</span>`;
+  if (run.state === "running") return `<span class="chip running"><span class="spin"></span>running</span>`;
+  if (run.outcome && run.outcome !== "ok") return `<span class="chip ${esc(run.outcome)}">${esc(run.outcome)}</span>`;
+  return `<span class="chip ${esc(run.status || "unknown")}">${esc(run.status || "unknown")}</span>`;
+}
+function meter(label, w) {
+  if (!w) return `<div class="meter"><div class="label"><span>${label}</span><span>?</span></div><div class="bar"></div></div>`;
+  const used = Math.max(0, Math.min(100, 100 - w.free_percentage));
+  return `<div class="meter"><div class="label"><span>${label} · ${Math.round(w.free_percentage)}% free</span>
+    <span>resets ${when(w.resets_at)}</span></div><div class="bar"><i style="width:${used}%"></i></div></div>`;
+}
+
+function renderHeader() {
+  const s = state.summary; $("#conn").className = "dot " + (state.connected ? "on" : "off");
+  if (!s) return;
+  const u = s.usage, h = s.health;
+  const age = u.age_minutes == null ? "no numbers yet" : `numbers ${Math.round(u.age_minutes)}m old`;
+  $("#usage").innerHTML = meter("5-hour", u.five_hour) + meter("7-day", u.seven_day) +
+    `<div class="probe muted small" style="text-align:right">${age}${u.probe.error ? ` · <span style="color:var(--bad)" title="${esc(u.probe.error)}">probe failed</span>` : ""}
+     <button id="probe" ${u.probe.running ? "disabled" : ""}>${u.probe.running ? "checking…" : "Check"}</button></div>`;
+  $("#probe").onclick = () => post("/api/usage/probe").then(load).catch((e) => toast(e.message));
+  $("#slots").textContent = `${h.running}/${h.max_parallel} running`;
+  $("#alerts").innerHTML = h.unseen_alerts ? `<span class="badge-count">${h.unseen_alerts}</span>` : "";
+  document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === state.tab && !state.view));
+}
+
+function routineLine(r) {
+  if (r.state === "running") return `<span class="muted">${esc(r.reason || "")}</span>`;
+  if (r.state === "waiting") return `<span style="color:var(--warn)">${esc(r.reason)}</span>${r.deadline ? ` <span class="muted">· gives up ${when(r.deadline)}</span>` : ""}`;
+  if (r.state === "broken") return `<span style="color:var(--bad)">${esc(r.reason)}</span>`;
+  if (r.state === "disabled") return `<span class="muted">off</span>`;
+  return `<span class="muted">next ${when(r.next_at)}</span>`;
+}
+
+function renderQuestions() {
+  return (state.summary.questions || []).map((q) => `<div class="card" style="border-color:var(--accent)">
+    <div class="row"><span class="title grow">${esc(q.title)} asks</span><span class="muted small">until ${when(q.deadline)}</span></div>
+    <div class="line2">${esc(q.question)}</div>
+    <div class="row line2">${q.buttons.map((b, i) => `<button ${i === 0 ? 'class="primary"' : ""} data-answer="${q.id}" data-button="${esc(b)}">${esc(b)}</button>`).join("")}</div></div>`).join("");
+}
+
+function renderRoutines() {
+  const s = state.summary;
+  const notices = [renderQuestions(), ...s.health.problems.map((p) => `<div class="notice">${esc(p)}</div>`),
+    ...(s.health.account_problem ? [`<div class="notice bad">${esc(s.health.account_problem)}</div>`] : [])].join("");
+  if (!s.routines.length) return notices + `<div class="empty">No routines yet.<br>Add files to ~/.claude_tab/routines/ (run <code>claude-tab install</code> for examples).</div>`;
+  return notices + s.routines.map((r) => {
+    const last = r.last_run;
+    const lastLine = last ? `<div class="row line2 small">${resultChip(last)}<span class="grow ellipsis muted">${esc(last.summary || last.error || "")}</span><span class="muted">${when(last.finished_at || last.started_at)}</span></div>` : "";
+    const toggle = r.state === "broken" ? "" : `<label class="switch" title="on / off" onclick="event.stopPropagation()">
+      <input type="checkbox" ${r.enabled ? "checked" : ""} data-toggle="${esc(r.name)}"><span></span></label>`;
+    const run = r.state === "running"
+      ? `<button class="danger" data-stop="${r.running_run_id}">Stop</button>`
+      : r.state === "broken" ? "" : `<button data-run="${esc(r.name)}">Run</button>`;
+    return `<div class="card click" data-open="${esc(r.name)}">
+      <div class="row"><span class="title grow">${esc(r.title)}</span>${stateChip(r)}${run}${toggle}</div>
+      <div class="row line2 small"><span class="muted">${esc(r.schedule_text || "")}</span><span class="grow ellipsis">${routineLine(r)}</span></div>
+      ${lastLine}</div>`;
+  }).join("");
+}
+
+function runCard(run) {
+  const text = run.summary || run.error || (run.live && run.live.last_event) || "";
+  return `<div class="card click" data-run-open="${run.id}" ${!run.seen && run.state === "finished" && (run.status === "alert" || run.outcome !== "ok") ? 'style="border-color:var(--bad)"' : ""}>
+    <div class="row"><span class="title grow">${esc(run.title)} <span class="muted small">#${run.id} · ${esc(run.trigger)}</span></span>${resultChip(run)}</div>
+    <div class="row line2 small"><span class="grow ellipsis">${esc(text)}</span>
+    <span class="muted">${run.cost_usd ? `$${run.cost_usd.toFixed(2)} · ` : ""}${when(run.started_at)}</span></div></div>`;
+}
+
+function renderActivity() {
+  const runs = state.summary.runs;
+  return runs.length ? runs.map(runCard).join("") : `<div class="empty">No runs yet.</div>`;
+}
+
+function renderRoutineDetail() {
+  const r = state.detail;
+  if (!r) return `<div class="empty">Loading…</div>`;
+  const props = r.state === "broken" ? [["file", r.path]] : [
+    ["schedule", `${r.schedule_text}${r.next_at ? ` · next ${relative(r.next_at)} (${clockTime(r.next_at)})` : ""}`], ["window", r.window],
+    ["grace", r.grace || "until the next one"], ["limits", `${r.profile}: start from ${r.limits.min_free}% free` +
+      (r.limits.before_reset ? `, within ${r.limits.before_reset}m of the reset` : "") +
+      `, keep ${r.limits.keep_free}% (5h) / ${r.limits.keep_free_weekly}% (7d)`],
+    ["priority", r.priority], ["notify", r.notify], ["model", r.model || "default"],
+    ["bounds", `${r.max_runtime}, ${r.max_turns} turns`], ["repos", (r.repos || []).join(", ") || "–"],
+    ["integrations", [...(r.mcp_servers || []), ...(r.plugins || []), ...(r.skills || [])].join(", ") || "–"],
+    ["file", r.path]];
+  const problems = (r.problems || []).map((p) => `<div class="notice">${esc(p)}</div>`).join("");
+  return `<button class="back" data-back>← Routines</button>
+    <div class="card"><div class="row"><span class="title grow">${esc(r.title)}</span>${stateChip(r)}
+      ${r.state === "running" ? `<button class="danger" data-stop="${r.running_run_id}">Stop</button>` : r.state === "broken" ? "" : `<button class="primary" data-run="${esc(r.name)}">Run now</button>`}</div>
+      <div class="small line2">${routineLine(r)}</div>
+      <dl class="props">${props.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>
+    ${problems}
+    ${r.prompt ? `<h2 class="section">Prompt</h2><div class="card report"><pre>${esc(r.prompt)}</pre></div>` : ""}
+    <h2 class="section">Runs</h2>${(r.runs || []).map((run) => runCard({ ...run, title: r.title })).join("") || `<div class="empty">No runs yet.</div>`}`;
+}
+
+function messageDetail(m) {
+  const r = m.report;
+  if (!r) return "";
+  if (m.kind === "blocker") return `<div class="muted">${esc(r.goal)}<br>${esc(r.details)}${(r.fix || []).length ? `<br><strong>Fix:</strong> ${r.fix.map(esc).join("; ")}` : ""}</div>`;
+  if (m.kind === "question") return `<div class="muted">${esc(r.buttons.join(" / "))} → ${r.status === "answered" ? `<strong>${esc(r.answer)}</strong> (${esc(r.via)})` : esc(r.status)}</div>`;
+  if (m.kind === "notify") return `<div class="muted">${esc(r.kind)} notification${r.by === "daemon" ? " from claude_tab" : ""}${r.shown === false ? ` · not shown: ${esc(r.problem)}` : ""}</div>`;
+  return "";
+}
+
+function renderRun() {
+  const run = state.run;
+  if (!run) return `<div class="empty">Loading…</div>`;
+  const live = run.live;
+  const props = [["routine", run.routine], ["trigger", run.trigger + (run.occurrence_at ? ` (due ${clockTime(run.occurrence_at)})` : "")],
+    ["started", clockTime(run.started_at)], ["finished", clockTime(run.finished_at)],
+    ["cost", run.usage && run.usage.cost_usd != null ? `$${run.usage.cost_usd.toFixed(2)} · ${run.usage.turns} turns` : "–"],
+    ["log", run.log_path || "–"]];
+  const messages = (run.messages || []).map((m) => `<div class="msg small"><span class="chip ${esc(m.kind === "user" ? "running" : m.kind === "success" ? "ok" : m.kind === "progress" ? "waiting" : m.kind)}">${esc(m.kind)}</span>
+    <div class="grow">${esc(m.text)}${messageDetail(m)}</div>
+    <span class="muted">${when(m.updated_at)}</span></div>`).join("");
+  return `<button class="back" data-back>← Back</button>
+    <div class="card"><div class="row"><span class="title grow">${esc(run.title)} <span class="muted small">#${run.id}</span></span>${resultChip(run)}
+      ${live ? `<button class="danger" data-stop="${run.id}">Stop</button>` : ""}</div>
+      ${run.summary ? `<div class="line2"><strong>${esc(run.summary)}</strong></div>` : ""}
+      ${run.error ? `<div class="line2" style="color:var(--bad)">${esc(run.error)}</div>` : ""}
+      ${(run.denied || []).length ? `<div class="line2 small" style="color:var(--warn)">Denied: ${run.denied.map(esc).join("; ")}</div>` : ""}
+      ${(run.unavailable || []).length ? `<div class="line2 small" style="color:var(--warn)">Not available: ${run.unavailable.map(esc).join("; ")}</div>` : ""}
+      ${live ? `<div class="line2 small muted"><span class="spin"></span> ${esc(live.last_event)}${live.wrapping_up ? ` · winding down: ${esc(live.wrapping_up)}` : ""}</div>
+        <div class="composer"><input id="say" placeholder="Message the agent…" ${live.accepts_messages ? "" : "disabled"}><button id="say-send">Send</button></div>` : ""}
+      <dl class="props">${props.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl></div>
+    ${messages ? `<h2 class="section">From the agent</h2><div class="card">${messages}</div>` : ""}
+    ${run.report ? `<h2 class="section">Report</h2><div class="card report">${markdown(run.report)}</div>` : ""}
+    <h2 class="section">Log <button id="log-load" class="small">${state.log ? "Refresh" : "Show"}</button></h2>
+    ${state.log ? `<pre class="log" id="log">${esc(state.log)}</pre>` : ""}`;
+}
+
+function render() {
+  renderHeader();
+  if (!state.summary) return;
+  const main = $("#main");
+  const scroll = window.scrollY;
+  main.innerHTML = state.view === "routine" ? renderRoutineDetail() : state.view === "run" ? renderRun()
+    : state.tab === "activity" ? renderActivity() : renderRoutines();
+  window.scrollTo(0, scroll);
+  const say = $("#say");
+  if (say) {
+    const send = () => { const text = say.value.trim(); if (!text) return;
+      post(`/api/runs/${state.run.id}/message`, { text }).then(() => { say.value = ""; toast("Sent"); openRun(state.run.id); }).catch((e) => toast(e.message)); };
+    $("#say-send").onclick = send; say.onkeydown = (e) => { if (e.key === "Enter") send(); };
+    if (render.sayDraft) { say.value = render.sayDraft; render.sayDraft = ""; }
+  }
+  const logButton = $("#log-load");
+  if (logButton) logButton.onclick = () => loadLog(state.run.id);
+  const log = $("#log"); if (log) log.scrollTop = log.scrollHeight;
+}
+
+// ---- actions ----
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-answer],[data-run],[data-stop],[data-open],[data-run-open],[data-back],[data-tab]");
+  if (!t) return;
+  if (t.dataset.answer) { post(`/api/questions/${t.dataset.answer}/answer`, { answer: t.dataset.button }).then(() => { toast("Answered"); load(); }).catch((err) => toast(err.message)); return; }
+  if (t.dataset.tab) { state.tab = t.dataset.tab; state.view = null; render(); if (state.tab === "activity") markSeen(); return; }
+  if (t.dataset.back !== undefined) { e.stopPropagation(); goBack(); return; }
+  if (t.dataset.run) { e.stopPropagation(); runRoutine(t.dataset.run, false); return; }
+  if (t.dataset.stop) { e.stopPropagation(); post(`/api/runs/${t.dataset.stop}/stop`).then(() => toast("Stopping…")).catch((err) => toast(err.message)); return; }
+  if (t.dataset.runOpen) { openRun(Number(t.dataset.runOpen)); return; }
+  if (t.dataset.open) { openRoutine(t.dataset.open); }
+});
+document.addEventListener("change", (e) => {
+  const name = e.target.dataset && e.target.dataset.toggle;
+  if (name) post(`/api/routines/${encodeURIComponent(name)}/enabled`, { enabled: e.target.checked }).then(load).catch((err) => toast(err.message));
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && state.view) goBack(); });
+
+const history_ = [];
+function goBack() { const prev = history_.pop(); if (prev) { state.view = prev.view; if (prev.view === "routine") openRoutine(prev.name, true); else render(); } else { state.view = null; render(); } }
+
+async function runRoutine(name, force) {
+  try { const r = await post(`/api/routines/${encodeURIComponent(name)}/run`, { force }); toast(`Started run #${r.run_id}`); load(); }
+  catch (e) {
+    if (e.status === 409 && /limits/.test(e.message) && !force) { if (confirm(`${e.message}\n\nRun it anyway?`)) runRoutine(name, true); }
+    else toast(e.message);
+  }
+}
+async function openRoutine(name, noPush) {
+  if (!noPush && state.view) history_.push({ view: state.view, name: state.detail && state.detail.name });
+  state.view = "routine"; state.detail = null; render(); window.scrollTo(0, 0);
+  try { state.detail = await api(`/api/routines/${encodeURIComponent(name)}`); } catch (e) { toast(e.message); }
+  render();
+}
+async function openRun(id) {
+  if (state.view !== "run" || !state.run || state.run.id !== id) {
+    if (state.view) history_.push({ view: state.view, name: state.detail && state.detail.name });
+    state.log = ""; state.run = null; state.view = "run"; render(); window.scrollTo(0, 0);
+  }
+  try { state.run = await api(`/api/runs/${id}`); if (!state.run.seen) post("/api/runs/seen", { ids: [id] }); } catch (e) { toast(e.message); }
+  const say = $("#say"); if (say) render.sayDraft = say.value;
+  render();
+}
+async function loadLog(id) { try { state.log = await api(`/api/runs/${id}/log?lines=300`); render(); } catch (e) { toast(e.message); } }
+function markSeen() {
+  const ids = (state.summary ? state.summary.runs : []).filter((r) => !r.seen && r.state === "finished").map((r) => r.id);
+  if (ids.length) post("/api/runs/seen", { ids }).then(load);
+}
+
+// ---- data ----
+async function load() {
+  try { state.summary = await api("/api/summary"); state.connected = true; }
+  catch (e) { state.connected = false; if (e.status === 401) { $("#main").innerHTML = `<div class="notice bad">No access: open this page with its token (<code>claude-tab open</code>).</div>`; renderHeader(); return; } }
+  render();
+}
+let pending = null;
+function refreshSoon() { clearTimeout(pending); pending = setTimeout(async () => {
+  await load();
+  if (state.view === "routine" && state.detail) { try { state.detail = await api(`/api/routines/${encodeURIComponent(state.detail.name)}`); render(); } catch (e) {} }
+  if (state.view === "run" && state.run) { openRun(state.run.id); if (state.log) loadLog(state.run.id); }
+}, 250); }
+
+async function stream() {
+  let delay = 1000;
+  for (;;) {
+    try {
+      const response = await fetch("/api/events", { headers: { "Authorization": `Bearer ${TOKEN}` } });
+      if (!response.ok) throw new Error(response.statusText);
+      state.connected = true; renderHeader(); delay = 1000; refreshSoon();
+      const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read(); if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let cut;
+        while ((cut = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, cut); buffer = buffer.slice(cut + 2);
+          const data = chunk.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("\n");
+          if (!data) continue;
+          const event = JSON.parse(data);
+          if (event.type === "run.event" && state.view === "run" && state.run && state.run.id === event.data.run_id && state.run.live) {
+            state.run.live.last_event = event.data.event; const say = $("#say"); if (say) render.sayDraft = say.value; render();
+          } else if (event.type !== "hello") refreshSoon();
+        }
+      }
+    } catch (e) { /* reconnect below */ }
+    state.connected = false; renderHeader();
+    await new Promise((r) => setTimeout(r, delay)); delay = Math.min(delay * 2, 15000);
+  }
+}
+
+load(); stream();
+setInterval(() => { if (state.summary) renderHeader(); }, 30000);  // relative times
+</script>
+</body>
+</html>

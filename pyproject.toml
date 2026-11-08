@@ -1,0 +1,57 @@
+[project]
+name = "claude-tab"
+version = "0.1.0"
+description = "A daemon that runs Claude Code routines on a schedule and within the plan's usage limits, with an API, MCP and CLI"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ilia", email = "melevir@gmail.com" }]
+requires-python = ">=3.12"
+keywords = ["claude-code", "mcp", "scheduler", "cron", "launchd", "agents", "macos"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    "httpx>=0.28",
+    "mcp>=2.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Melevir/claude_tab"
+Issues = "https://github.com/Melevir/claude_tab/issues"
+Changelog = "https://github.com/Melevir/claude_tab/blob/main/CHANGELOG.md"
+
+[project.scripts]
+claude-tab = "claude_tab.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["claude_tab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"claude_tab/core/notify.py" = ["E501"]  # AppleScript source kept on one line per statement

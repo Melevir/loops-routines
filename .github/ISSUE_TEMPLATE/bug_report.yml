@@ -1,0 +1,30 @@
+name: Bug report
+description: Something doesn't work as described
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: routine
+    attributes:
+      label: The routine
+      description: The routine file's header (between the +++ lines), if a routine is involved. Remove anything private.
+      render: toml
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`claude-tab status`, `claude-tab get RUN`, the end of ~/Library/Logs/claude_tab/daemon.log. Remove tokens and private data."
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: claude-tab (`claude-tab status`), `claude --version`, macOS
+    validations:
+      required: true
