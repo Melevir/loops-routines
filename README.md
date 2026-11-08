@@ -1,6 +1,7 @@
 # loops-routines
 
 [![CI](https://github.com/Melevir/loops-routines/actions/workflows/ci.yml/badge.svg)](https://github.com/Melevir/loops-routines/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/loops-routines.svg)](https://pypi.org/project/loops-routines/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > An independent project, not made or endorsed by Anthropic. "Claude" and "Claude Code" are Anthropic's
@@ -25,7 +26,7 @@ Needs macOS, [uv](https://docs.astral.sh/uv/) and [Claude Code](https://claude.c
 on your `PATH`, signed in).
 
 ```bash
-uv tool install git+https://github.com/Melevir/loops-routines   # the `loops-routines` command in ~/.local/bin
+uv tool install loops-routines       # from PyPI: the `loops-routines` command in ~/.local/bin
 loops-routines install --launchd --mcp   # ~/.loops_routines, the daemon as a LaunchAgent, the MCP server in Claude Code
 loops-routines status
 ```

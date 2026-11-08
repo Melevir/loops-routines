@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-08
+
+The first release.
+
 ### Added
 
 - The daemon: routines on a cron line or an interval, within the plan's 5-hour and 7-day usage limits,
@@ -15,3 +19,6 @@ All notable changes to this project are documented here. The format follows
 - Agent tools: `report_status`, `report_blocker`, `notify` (macOS banners) and `ask_user` (dialogs with
   the agent's own buttons).
 - `loops-routines install --launchd --mcp` and `loops-routines restart`.
+
+[Unreleased]: https://github.com/Melevir/loops-routines/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Melevir/loops-routines/releases/tag/v0.1.0
