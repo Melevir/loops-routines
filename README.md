@@ -4,191 +4,238 @@
 [![PyPI](https://img.shields.io/pypi/v/loops-routines.svg)](https://pypi.org/project/loops-routines/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> An independent project, not made or endorsed by Anthropic. "Claude" and "Claude Code" are Anthropic's
-> trademarks; loops-routines only starts the `claude` command you already have.
+**Claude Code agents that run on a schedule, in the background, on your Mac, and spend only the part of
+your plan you choose.**
 
-A daemon that runs Claude Code **routines** (on a cron line or an interval) **within your plan's usage
-limits**. One process serves everything: the scheduler, the REST API with live events, the MCP server
-for your Claude sessions, and a small web page. Agents tell you things with **macOS notifications** and
-ask you questions in **system dialogs with their own buttons**, waiting for your click.
+Your Claude plan resets every 5 hours, and whatever you didn't use is gone. loops-routines turns that
+leftover into work: a weekly changelog, a log check every half hour, a small cleanup PR whenever tokens
+would otherwise expire. Each routine is one Markdown file — a few settings and a prompt.
 
-Examples it is made for:
-
-- a weekly summary of the changes in several repositories (`0 9 * * mon`);
-- a cleanup every 2 hours, but only with tokens the 5-hour window would lose anyway (`profile = "spare"`);
-- a log monitor every 30 minutes that stays quiet until something new breaks (`notify = "on_alert"`).
+- ⏰ **Cron or intervals** — `0 9 * * mon`, `every 30m`, only inside `mon-fri 07:00-11:00`.
+- 🪫 **Budget-aware** — start only with spare tokens, keep a reserve, wind a run down before it eats into
+  your own work.
+- 🔔 **Tells you, asks you** — macOS notifications, and dialogs with the agent's own buttons that wait for
+  your click.
+- 🤖 **Steer it from Claude Code** — "run the log watchdog now", "what did the changelog say?" through MCP.
+- 💤 **Sleep-proof** — a Mac that slept all night runs a routine once, not sixteen times.
 
 ![The web page: the plan's 5-hour and 7-day windows, and the routines with their schedules](docs/screenshot.jpg)
 
 ## Install
 
-Needs macOS, [uv](https://docs.astral.sh/uv/) and [Claude Code](https://claude.com/claude-code) (`claude`
-on your `PATH`, signed in).
+Needs macOS and [Claude Code](https://claude.com/claude-code) (`claude` on your `PATH`, signed in).
 
 ```bash
-brew install melevir/tap/loops-routines   # or, with uv: uv tool install loops-routines
-loops-routines install --launchd --mcp    # ~/.loops_routines, the daemon as a LaunchAgent, the MCP server in Claude Code
+brew install melevir/tap/loops-routines   # or: uv tool install loops-routines
+loops-routines install --launchd --mcp    # config + examples, the daemon at login, the MCP server in Claude Code
 loops-routines status
 ```
 
-`--launchd` writes `~/Library/LaunchAgents/com.loops-routines.daemon.plist` and loads it: the daemon starts now
-and at every login, and launchd restarts it if it stops. It runs as you (a LaunchAgent, not a system
-LaunchDaemon), so agents use your Claude sign-in, keychain and tools. Run the install from a terminal
-whose `PATH` finds `claude` and whatever your routines call: the LaunchAgent keeps that `PATH`.
+Then drop a recipe below into `~/.loops_routines/routines/`. `loops-routines open` shows the web page.
 
-Upgrade, then restart the daemon so it runs the new code:
+## Recipes
+
+Each one is a file in [`examples/`](examples). Copy it to `~/.loops_routines/routines/`, change the
+repositories and services, and it runs from the next tick; `loops-routines check <file>` shows its
+next three runs first.
+
+### 📋 Weekly changelog
+
+**You get:** every Monday morning, a report of last week's merged PRs grouped by theme, and a
+notification with the one-line summary.
+
+```toml
++++
+title = "Weekly changelog"
+schedule = "0 9 * * mon"     # Mondays 09:00
+grace = "1d"                 # the Mac slept through it? catch up during the day
+model = "sonnet"
+notify = "always"            # a banner with the one-line summary when it's ready
++++
+Summarise what was merged in the 7 days before {now} in these repositories:
+- your-org/backend
+- your-org/frontend
+...
+```
+
+[Full file](examples/weekly-changelog.md)
+
+### 🧹 Spare-token cleanup
+
+**You get:** small, safe draft PRs (dead code, a missing test, a bad name), made only from tokens your
+5-hour window would have thrown away.
+
+```toml
++++
+title = "Spare-token cleanup"
+schedule = "every 2h"
+profile = "spare"            # only with 60%+ of the 5-hour window free and a reset within 2 hours
+priority = 20                # anything more important goes first
+repos = ["your-org/backend"] # cloned fresh into the run's own folder
+allowed_tools = ["Bash(make *)", "Bash(uv *)", "Bash(git push -u origin cleanup/*)",
+                 "Bash(gh pr create --draft *)"]
+max_runtime = "90m"
+notify = "on_alert"
++++
+In {repos}, pick one small, safe cleanup ...
+```
+
+[Full file](examples/spare-cleanup.md)
+
+### 🚨 Log watchdog
+
+**You get:** silence while everything is fine, and a notification the moment a *new* error shows up.
+It compares each check with its own previous report.
+
+```toml
++++
+title = "Log watchdog"
+schedule = "every 30m"
+grace = "20m"                # a check that couldn't start in 20 minutes is skipped, not piled up
+priority = 80
+model = "sonnet"
+effort = "low"
+max_runtime = "10m"
+mcp_servers = ["sentry"]     # whatever logs server you have: `loops-routines integrations` lists them
+notify = "on_alert"          # silent while all is well
++++
+Check production errors for my-api and my-worker since {last_run_at}. ...
+Your previous report, to tell new errors from known ones:
+{previous_report}
+```
+
+[Full file](examples/log-watchdog.md)
+
+### ☕ Review queue
+
+**You get:** on weekday mornings, the PRs waiting for your review, each in one line with its size and
+CI state, the oldest first.
+
+```toml
++++
+title = "Review queue"
+schedule = "30 8 * * mon-fri"   # weekdays 08:30, before you sit down
+window = "mon-fri 07:00-11:00"  # waiting for limits? still only in the morning
+model = "sonnet"
+notify = "always"
++++
+Find the pull requests waiting for my review: `gh search prs --review-requested=@me --state=open`. ...
+```
+
+[Full file](examples/review-queue.md)
+
+### 🙋 Dependency bumps, with your OK
+
+**You get:** a dialog on your screen: *"5 bumps are green, 1 looks risky. Approve the safe ones?"*,
+with the buttons **Approve safe ones**, **Show me first** and **Skip**. Nothing is approved unless you
+click.
+
+```toml
++++
+title = "Dependency bumps"
+schedule = "0 16 * * fri"
+profile = "spare"            # any spare tokens between this Friday and the next
+allowed_tools = ["Bash(gh pr review * --approve*)"]
+notify = "always"            # a banner with the outcome; the agent may also ask you
++++
+List the open Dependabot PRs in your-org/backend with green CI. ...
+Then ask me with `ask_user` ... Approve only on "Approve safe ones".
+```
+
+[Full file](examples/dependency-bumps.md)
+
+## Ingredients
+
+Everything a routine's header can say. Only `schedule` is required.
+
+**When**
+
+| key | what it does | default |
+|---|---|---|
+| `schedule` | cron (`0 9 * * mon`, `@daily`) or an interval (`every 30m`) | — |
+| `window` | start only inside it: `mon-fri 07:00-11:00`, several joined by `;` | any time |
+| `grace` | how long a run may wait for its window and budget before it's skipped | until the next run is due |
+| `priority` | 0–100: who goes first when several are due | 50 |
+| `enabled` | the switch on the web page, CLI or MCP overrides it | `true` |
+
+**Budget** — percentages of your plan's windows
+
+| key | what it does | default |
+|---|---|---|
+| `profile` | `any` (whenever due), `spare` (only tokens about to expire), `unlimited`, or your own | `any` |
+| `min_free` | start only with this much of the 5-hour window free | profile's |
+| `before_reset` | start only if the 5-hour window resets within N minutes | profile's |
+| `keep_free`, `keep_free_weekly` | never touch the last N% of the 5-hour / 7-day window: a run that reaches it is wound down | 5, 5 |
+
+**The agent**
+
+| key | what it does | default |
+|---|---|---|
+| `model`, `effort` | the Claude model and reasoning effort | your `claude` default |
+| `max_turns`, `max_runtime` | hard stops | 50, `30m` |
+| `repos` | `owner/name` repositories, cloned fresh into the run's own folder | none |
+| `mcp_servers`, `plugins`, `skills` | what it may use from your Claude Code setup (`loops-routines integrations`) | none |
+| `allowed_tools`, `disallowed_tools` | permissions on top of the safe defaults (read, `git`, `gh` read commands; never force-push or merge) | none |
+
+**Talking to you**
+
+| key | what it does | default |
+|---|---|---|
+| `notify` | `always`: a notification when it finishes; `on_alert`: only when something is wrong; `never`: quiet. With `always` and `on_alert` the agent may also ask you in a dialog | `on_alert` |
+
+**In the prompt:** `{now}`, `{last_run_at}`, `{previous_summary}`, `{previous_report}`,
+`{previous_status}`, `{repos}`, `{run_id}`, `{name}`, `{title}`.
+
+Every run ends with a status (`ok`, `alert` or `nothing`), a one-line summary and a Markdown report,
+kept with the run in `~/Library/Application Support/loops_routines/reports/`.
+
+## Steer it from Claude Code
+
+`loops-routines install --mcp` adds an MCP server to Claude Code, so you can just ask:
+
+- *"What did the weekly changelog say?"*
+- *"Run the log watchdog now, outside the queue."*
+- *"Switch off the cleanup."*
+- *"Which routine is waiting, and why?"*
+- *"Answer the dependency question: Show me first."*
+
+The same from the terminal:
 
 ```bash
-brew upgrade loops-routines     # or: uv tool upgrade loops-routines
-loops-routines restart
+loops-routines status                 # every routine: idle, waiting (and why), running
+loops-routines run log-watchdog --now # start one now, even with all slots busy
+loops-routines runs                   # recent runs; `get RUN` for one report
+loops-routines disable spare-cleanup
+loops-routines watch                  # live events
 ```
 
-Remove: `loops-routines uninstall` (the LaunchAgent; `~/.loops_routines` is kept), then `brew uninstall loops-routines` (or `uv tool uninstall loops-routines`).
+## How it decides when to run
 
-### Before you start
+- Only the **latest** due run counts: a sleeping Mac catches up once.
+- A due run **waits** for its window and budget until `grace` runs out (or the next one is due). Then
+  it's recorded as **skipped**, with the reason.
+- With several due: higher `priority` first, at most `max_parallel` (2) at a time, never two of the same
+  routine.
+- Budget numbers come from your own runs; when they're older than 30 minutes, one tiny haiku request
+  refreshes them.
 
-- **macOS only.** Notifications, dialogs and the LaunchAgent are macOS's; the scheduler itself is not, but
-  nothing else is supported yet.
-- **Routines spend your plan.** Every run is a `claude -p` session on your own sign-in and counts against
-  your 5-hour and 7-day windows. Limit profiles (`spare`, `keep_free`) decide how much a routine may take;
-  start with `profile = "spare"` for anything that doesn't have to run.
-- **Agents act as you.** They run with your files, keychain and `gh` login, limited by the allowed tools in
-  `config.toml` and the routine. Read [SECURITY.md](SECURITY.md) before switching on a routine that pushes,
-  posts or reads untrusted text.
-- The example routines in `~/.loops_routines/routines/` are switched off and name placeholder repositories and
-  services: edit them first.
+## Good to know
 
-## Quick start (from a checkout)
+- **macOS only** for now: notifications, dialogs and the LaunchAgent are macOS's.
+- **Routines spend your plan.** Every run is a `claude -p` session on your sign-in. Start with
+  `profile = "spare"` for anything that doesn't have to run.
+- **Agents act as you,** with your files, keychain and `gh` login, limited by their allowed tools. Read
+  [SECURITY.md](SECURITY.md) before switching on a routine that pushes, posts or reads untrusted text.
+- Upgrade with `brew upgrade loops-routines` (or `uv tool upgrade`), then `loops-routines restart`.
+  Remove with `loops-routines uninstall`; `~/.loops_routines` is kept.
 
-```bash
-uv sync
-uv run loops-routines install            # ~/.loops_routines: config.toml, README, three example routines (off)
-uv run loops-routines daemon             # or: loops-routines install --launchd  (keeps it running, starts at login)
-uv run loops-routines status
-uv run loops-routines open               # the web page in the browser
-uv run loops-routines install --mcp      # let your Claude Code sessions see and steer the routines
-```
+## More
 
-A routine is a file `~/.loops_routines/routines/<name>.md`: a TOML header between `+++` lines, then the
-prompt. See `loops_routines/defaults/README.md` (copied to `~/.loops_routines/README.md`) for every key, and
-`loops-routines check <file>` to validate one and see its next three runs.
+- [How it works](docs/architecture.md): the daemon, the scheduler, results, notifications, the REST API
+  and MCP tools.
+- [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md) · [Security](SECURITY.md)
 
-## Architecture
+---
 
-```
- launchd (KeepAlive)
-   └─ loops-routines daemon ───────────────────────────────────────────────────────────┐
-        Service.tick (every 30 s): reload files → wind down runs past keep_free →  │
-          evaluate each routine → expire / wait / launch by priority → probe usage   │
-        Run × max_parallel → `claude -p` stream-json, own process group, own folder │
-        Store (SQLite, the daemon's only)     deliver: reports/*.md                 │
-        REST /api/* + SSE /api/events   MCP /mcp (user)   MCP /agent/mcp (runs)    │
-        /ui/ — a web page on the same API                                           │
- ────────────────────────────────────────────────────────────────────────────────────┘
-   ▲ REST + SSE              ▲ MCP                    ▲ REST
- browser                    Claude Code              CLI
-
- run ── /agent/mcp notify ──▶ daemon ──▶ banner (Notification Center)
- run ── /agent/mcp ask_user ─▶ daemon ──▶ dialog with buttons ──┐  first answer wins:
-                               ◀── answer ── web page / CLI / MCP ┘  the dialog, or any of these
-```
-
-| Module | What it does |
-|---|---|
-| `core/triggers.py` | cron (5 fields, names, steps, `@daily`) and `every 30m`; `next_after(moment)` |
-| `core/windows.py` | time windows `mon-fri 09:00-19:00` (from Loops) |
-| `core/routines.py` | routine files → `Routine`; broken files are kept with their error |
-| `core/evaluate.py` | the pure decision: idle / wait (why) / launch / expire for one routine |
-| `core/usage.py`, `core/probe.py` | 5-hour and 7-day snapshots, the limit gates, the one-request probe (from Loops) |
-| `core/integrations.py` | plugins, MCP servers, skills a routine names → `claude` flags (from Loops) |
-| `core/runner.py` | one run: clones, per-run config files, stream-json in/out, stop, wrap-up, result file |
-| `core/store.py` | SQLite: routine state, runs (and skipped occurrences), messages from agents |
-| `service.py` | the scheduler tick and every query and action; REST, MCP and CLI are thin over it |
-| `daemon/app.py`, `daemon/mcp.py`, `daemon/auth.py` | HTTP transports and the token check |
-| `core/notify.py` | macOS banners and button dialogs through osascript; the prompt rules per `notify` |
-| `ui/web/index.html` | the web page (`loops-routines open`) |
-
-### Scheduling rules
-
-- Occurrences come from the trigger; only the **latest** due one counts, so a Mac that slept for a day
-  runs a routine once, not 48 times.
-- An occurrence may wait for its window and limits until its deadline: `grace` after it, or (without
-  `grace`) until the next occurrence. Past it, it is recorded as **skipped** with the reason it waited for.
-- Limits: `min_free` and `before_reset` decide the start; `keep_free` / `keep_free_weekly` also wind a
-  running run down (it gets `wind_down_minutes` to write its result, then it is stopped).
-- When numbers are older than `max_snapshot_age_minutes`, the daemon spends one haiku request on a
-  probe (at most every `probe_cooldown_minutes`). Every run also refreshes them from its own events.
-- Several due routines: higher `priority` first, up to `max_parallel` at once; a routine never overlaps
-  itself. "Run now" does not use up an occurrence.
-- A routine switched off (in its file or the UI) owes nothing for the time it was off.
-
-### Results
-
-The agent ends by writing `{"status": "ok | alert | nothing", "summary", "report"}` to its result file.
-The daemon stores it and writes `reports/<routine>/<run>.md`. Without a result file, the agent's last
-words become the summary with status `unknown`. While it works, the agent may post `report_status`
-lines through `/agent/mcp`, and you can message it (`loops-routines say RUN TEXT`).
-
-### Notifications and questions
-
-Agents use two tools of `/agent/mcp`, as their routine's `notify` allows (`always`: the outcome when it
-finishes; `on_alert`: only an alert; `never`: neither tool):
-
-- `notify(text, kind)` — a Notification Center banner titled with the routine; `kind` is info, success,
-  warning or error (error and warning play `[notify] error_sound`).
-- `ask_user(question, buttons, timeout_minutes)` — a system dialog with 1–3 buttons of the agent's wording
-  (the recommended one is the default, on the right) and waits. The first answer wins: a click in the
-  dialog, the web page, `loops-routines answer`, or `answer_question` over MCP; the dialog then closes. No
-  answer in time, or the run ends: the agent gets `timed_out` / `cancelled` and takes the safe path.
-
-The daemon notifies by itself only what no agent can: a run that failed or timed out, an alert the agent
-did not send, and a `report_blocker`. Everything is kept with the run.
-
-Why a dialog and not buttons on the banner: macOS gives notification actions only to a signed app with its
-own notification permission; osascript banners can't have buttons. The first banner may make macOS ask
-whether "Script Editor" may notify — allow it in System Settings → Notifications. `loops-routines
-notify-test` (and `--ask`) checks both.
-
-### Security
-
-The daemon listens on 127.0.0.1 only and checks the Host header. `/api` and `/mcp` need the token in
-`~/Library/Application Support/loops_routines/token` (0600); `/agent/mcp` accepts only a live run's own token,
-so an agent can't post as another run. The UI page gets the token from its URL fragment (never sent to
-the server) and keeps it for the tab only.
-
-## API
-
-```
-GET  /health                         GET  /api/summary
-GET  /api/routines                   GET  /api/routines/{name}
-POST /api/routines/{name}/run {force, out_of_queue}
-POST /api/routines/{name}/enabled {enabled: true|false|null}
-GET  /api/runs?routine=&limit=&before=&skipped=0
-GET  /api/runs/{id}                  GET  /api/runs/{id}/log?lines=
-POST /api/runs/{id}/stop             POST /api/runs/{id}/message {text}
-POST /api/runs/seen {ids}
-GET  /api/usage                      POST /api/usage/probe
-GET  /api/integrations               POST /api/integrations/scan
-GET  /api/questions                  POST /api/questions/{id}/answer {answer}
-POST /api/notify/test {kind, ask}
-POST /api/reload                     GET  /api/events  (SSE)
-```
-
-MCP `/mcp`: `list_routines`, `routine_status`, `run_routine`, `run_routine_now` (outside the queue: on top
-of `max_parallel`, whatever its limits and window say), `set_routine_enabled`, `list_runs`,
-`get_run`, `run_log`, `stop_run`, `message_run`, `usage`, `pending_questions`, `answer_question`.
-MCP `/agent/mcp` (runs only): `report_status`, `report_blocker`, `notify`, `ask_user`.
-
-## Development
-
-```bash
-uv run pytest
-uv run loops-routines --root /tmp/ct daemon     # a separate instance: /tmp/ct/home, state, logs
-```
-
-Tests run the real runner against a fake `claude` script (`tests/conftest.py`). See
-[CONTRIBUTING.md](CONTRIBUTING.md) for the rest, and [CHANGELOG.md](CHANGELOG.md) for what changed.
-
-## License
-
-[MIT](LICENSE).
+An independent project, not made or endorsed by Anthropic. "Claude" and "Claude Code" are Anthropic's
+trademarks; loops-routines only starts the `claude` command you already have. [MIT](LICENSE) licensed.
