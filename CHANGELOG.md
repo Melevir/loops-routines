@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format follows
 - The daemon: routines on a cron line or an interval, within the plan's 5-hour and 7-day usage limits,
   with priorities, parallel slots, grace periods and time windows.
 - REST API with live events, an MCP server for Claude Code sessions, a CLI and a web page.
-- `run_routine_now` (MCP) and `claude-tab run --now`: start a routine outside the queue.
+- `run_routine_now` (MCP) and `loops-routines run --now`: start a routine outside the queue.
 - Agent tools: `report_status`, `report_blocker`, `notify` (macOS banners) and `ask_user` (dialogs with
   the agent's own buttons).
-- `claude-tab install --launchd --mcp` and `claude-tab restart`.
+- `loops-routines install --launchd --mcp` and `loops-routines restart`.

@@ -1,7 +1,7 @@
 import pytest
 
-from claude_tab.core.deliver import daemon_should_post
-from claude_tab.core.notify import check_buttons, instructions
+from loops_routines.core.deliver import daemon_should_post
+from loops_routines.core.notify import check_buttons, instructions
 
 
 def test_buttons():

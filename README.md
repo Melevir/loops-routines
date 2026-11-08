@@ -1,10 +1,10 @@
-# claude_tab
+# loops-routines
 
-[![CI](https://github.com/Melevir/claude_tab/actions/workflows/ci.yml/badge.svg)](https://github.com/Melevir/claude_tab/actions/workflows/ci.yml)
+[![CI](https://github.com/Melevir/loops-routines/actions/workflows/ci.yml/badge.svg)](https://github.com/Melevir/loops-routines/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > An independent project, not made or endorsed by Anthropic. "Claude" and "Claude Code" are Anthropic's
-> trademarks; claude_tab only starts the `claude` command you already have.
+> trademarks; loops-routines only starts the `claude` command you already have.
 
 A daemon that runs Claude Code **routines** (on a cron line or an interval) **within your plan's usage
 limits**. One process serves everything: the scheduler, the REST API with live events, the MCP server
@@ -17,18 +17,20 @@ Examples it is made for:
 - a cleanup every 2 hours, but only with tokens the 5-hour window would lose anyway (`profile = "spare"`);
 - a log monitor every 30 minutes that stays quiet until something new breaks (`notify = "on_alert"`).
 
+![The web page: the plan's 5-hour and 7-day windows, and the routines with their schedules](docs/screenshot.jpg)
+
 ## Install
 
 Needs macOS, [uv](https://docs.astral.sh/uv/) and [Claude Code](https://claude.com/claude-code) (`claude`
 on your `PATH`, signed in).
 
 ```bash
-uv tool install git+https://github.com/Melevir/claude_tab   # the `claude-tab` command in ~/.local/bin
-claude-tab install --launchd --mcp   # ~/.claude_tab, the daemon as a LaunchAgent, the MCP server in Claude Code
-claude-tab status
+uv tool install git+https://github.com/Melevir/loops-routines   # the `loops-routines` command in ~/.local/bin
+loops-routines install --launchd --mcp   # ~/.loops_routines, the daemon as a LaunchAgent, the MCP server in Claude Code
+loops-routines status
 ```
 
-`--launchd` writes `~/Library/LaunchAgents/com.claude-tab.daemon.plist` and loads it: the daemon starts now
+`--launchd` writes `~/Library/LaunchAgents/com.loops-routines.daemon.plist` and loads it: the daemon starts now
 and at every login, and launchd restarts it if it stops. It runs as you (a LaunchAgent, not a system
 LaunchDaemon), so agents use your Claude sign-in, keychain and tools. Run the install from a terminal
 whose `PATH` finds `claude` and whatever your routines call: the LaunchAgent keeps that `PATH`.
@@ -36,11 +38,11 @@ whose `PATH` finds `claude` and whatever your routines call: the LaunchAgent kee
 Upgrade, then restart the daemon so it runs the new code:
 
 ```bash
-uv tool upgrade claude-tab
-claude-tab restart
+uv tool upgrade loops-routines
+loops-routines restart
 ```
 
-Remove: `claude-tab uninstall` (the LaunchAgent; `~/.claude_tab` is kept), then `uv tool uninstall claude-tab`.
+Remove: `loops-routines uninstall` (the LaunchAgent; `~/.loops_routines` is kept), then `uv tool uninstall loops-routines`.
 
 ### Before you start
 
@@ -52,29 +54,29 @@ Remove: `claude-tab uninstall` (the LaunchAgent; `~/.claude_tab` is kept), then 
 - **Agents act as you.** They run with your files, keychain and `gh` login, limited by the allowed tools in
   `config.toml` and the routine. Read [SECURITY.md](SECURITY.md) before switching on a routine that pushes,
   posts or reads untrusted text.
-- The example routines in `~/.claude_tab/routines/` are switched off and name placeholder repositories and
+- The example routines in `~/.loops_routines/routines/` are switched off and name placeholder repositories and
   services: edit them first.
 
 ## Quick start (from a checkout)
 
 ```bash
 uv sync
-uv run claude-tab install            # ~/.claude_tab: config.toml, README, three example routines (off)
-uv run claude-tab daemon             # or: claude-tab install --launchd  (keeps it running, starts at login)
-uv run claude-tab status
-uv run claude-tab open               # the web page in the browser
-uv run claude-tab install --mcp      # let your Claude Code sessions see and steer the routines
+uv run loops-routines install            # ~/.loops_routines: config.toml, README, three example routines (off)
+uv run loops-routines daemon             # or: loops-routines install --launchd  (keeps it running, starts at login)
+uv run loops-routines status
+uv run loops-routines open               # the web page in the browser
+uv run loops-routines install --mcp      # let your Claude Code sessions see and steer the routines
 ```
 
-A routine is a file `~/.claude_tab/routines/<name>.md`: a TOML header between `+++` lines, then the
-prompt. See `claude_tab/defaults/README.md` (copied to `~/.claude_tab/README.md`) for every key, and
-`claude-tab check <file>` to validate one and see its next three runs.
+A routine is a file `~/.loops_routines/routines/<name>.md`: a TOML header between `+++` lines, then the
+prompt. See `loops_routines/defaults/README.md` (copied to `~/.loops_routines/README.md`) for every key, and
+`loops-routines check <file>` to validate one and see its next three runs.
 
 ## Architecture
 
 ```
  launchd (KeepAlive)
-   └─ claude-tab daemon ───────────────────────────────────────────────────────────┐
+   └─ loops-routines daemon ───────────────────────────────────────────────────────────┐
         Service.tick (every 30 s): reload files → wind down runs past keep_free →  │
           evaluate each routine → expire / wait / launch by priority → probe usage   │
         Run × max_parallel → `claude -p` stream-json, own process group, own folder │
@@ -103,7 +105,7 @@ prompt. See `claude_tab/defaults/README.md` (copied to `~/.claude_tab/README.md`
 | `service.py` | the scheduler tick and every query and action; REST, MCP and CLI are thin over it |
 | `daemon/app.py`, `daemon/mcp.py`, `daemon/auth.py` | HTTP transports and the token check |
 | `core/notify.py` | macOS banners and button dialogs through osascript; the prompt rules per `notify` |
-| `ui/web/index.html` | the web page (`claude-tab open`) |
+| `ui/web/index.html` | the web page (`loops-routines open`) |
 
 ### Scheduling rules
 
@@ -124,7 +126,7 @@ prompt. See `claude_tab/defaults/README.md` (copied to `~/.claude_tab/README.md`
 The agent ends by writing `{"status": "ok | alert | nothing", "summary", "report"}` to its result file.
 The daemon stores it and writes `reports/<routine>/<run>.md`. Without a result file, the agent's last
 words become the summary with status `unknown`. While it works, the agent may post `report_status`
-lines through `/agent/mcp`, and you can message it (`claude-tab say RUN TEXT`).
+lines through `/agent/mcp`, and you can message it (`loops-routines say RUN TEXT`).
 
 ### Notifications and questions
 
@@ -135,7 +137,7 @@ finishes; `on_alert`: only an alert; `never`: neither tool):
   warning or error (error and warning play `[notify] error_sound`).
 - `ask_user(question, buttons, timeout_minutes)` — a system dialog with 1–3 buttons of the agent's wording
   (the recommended one is the default, on the right) and waits. The first answer wins: a click in the
-  dialog, the web page, `claude-tab answer`, or `answer_question` over MCP; the dialog then closes. No
+  dialog, the web page, `loops-routines answer`, or `answer_question` over MCP; the dialog then closes. No
   answer in time, or the run ends: the agent gets `timed_out` / `cancelled` and takes the safe path.
 
 The daemon notifies by itself only what no agent can: a run that failed or timed out, an alert the agent
@@ -143,13 +145,13 @@ did not send, and a `report_blocker`. Everything is kept with the run.
 
 Why a dialog and not buttons on the banner: macOS gives notification actions only to a signed app with its
 own notification permission; osascript banners can't have buttons. The first banner may make macOS ask
-whether "Script Editor" may notify — allow it in System Settings → Notifications. `claude-tab
+whether "Script Editor" may notify — allow it in System Settings → Notifications. `loops-routines
 notify-test` (and `--ask`) checks both.
 
 ### Security
 
 The daemon listens on 127.0.0.1 only and checks the Host header. `/api` and `/mcp` need the token in
-`~/Library/Application Support/claude_tab/token` (0600); `/agent/mcp` accepts only a live run's own token,
+`~/Library/Application Support/loops_routines/token` (0600); `/agent/mcp` accepts only a live run's own token,
 so an agent can't post as another run. The UI page gets the token from its URL fragment (never sent to
 the server) and keeps it for the tab only.
 
@@ -180,7 +182,7 @@ MCP `/agent/mcp` (runs only): `report_status`, `report_blocker`, `notify`, `ask_
 
 ```bash
 uv run pytest
-uv run claude-tab --root /tmp/ct daemon     # a separate instance: /tmp/ct/home, state, logs
+uv run loops-routines --root /tmp/ct daemon     # a separate instance: /tmp/ct/home, state, logs
 ```
 
 Tests run the real runner against a fake `claude` script (`tests/conftest.py`). See

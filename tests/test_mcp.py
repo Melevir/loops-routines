@@ -8,11 +8,11 @@ import pytest
 from conftest import FakeNotifier, write_routine
 from mcp.server.mcpserver.exceptions import ToolError
 
-from claude_tab.core import paths
-from claude_tab.core.runner import Run
-from claude_tab.core.store import Store
-from claude_tab.daemon.mcp import agent_server, user_server
-from claude_tab.service import Service
+from loops_routines.core import paths
+from loops_routines.core.runner import Run
+from loops_routines.core.store import Store
+from loops_routines.daemon.mcp import agent_server, user_server
+from loops_routines.service import Service
 
 
 @pytest.fixture

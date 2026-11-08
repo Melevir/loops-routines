@@ -19,12 +19,12 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: "`claude-tab status`, `claude-tab get RUN`, the end of ~/Library/Logs/claude_tab/daemon.log. Remove tokens and private data."
+      description: "`loops-routines status`, `loops-routines get RUN`, the end of ~/Library/Logs/loops_routines/daemon.log. Remove tokens and private data."
       render: text
   - type: input
     id: versions
     attributes:
       label: Versions
-      description: claude-tab (`claude-tab status`), `claude --version`, macOS
+      description: loops-routines (`loops-routines status`), `claude --version`, macOS
     validations:
       required: true

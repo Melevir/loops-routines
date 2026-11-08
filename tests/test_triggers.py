@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 from conftest import utc
 
-from claude_tab.core.triggers import Cron, Every, fmt_duration, parse_duration, parse_trigger
+from loops_routines.core.triggers import Cron, Every, fmt_duration, parse_duration, parse_trigger
 
 
 def test_durations():

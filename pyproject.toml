@@ -1,6 +1,6 @@
 [project]
-name = "claude-tab"
-version = "0.1.0"
+name = "loops-routines"
+dynamic = ["version"]  # from the git tag (vX.Y.Z) through hatch-vcs
 description = "A daemon that runs Claude Code routines on a schedule and within the plan's usage limits, with an API, MCP and CLI"
 readme = "README.md"
 license = "MIT"
@@ -26,22 +26,26 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Melevir/claude_tab"
-Issues = "https://github.com/Melevir/claude_tab/issues"
-Changelog = "https://github.com/Melevir/claude_tab/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Melevir/loops-routines"
+Issues = "https://github.com/Melevir/loops-routines/issues"
+Changelog = "https://github.com/Melevir/loops-routines/blob/main/CHANGELOG.md"
 
 [project.scripts]
-claude-tab = "claude_tab.cli:main"
+loops-routines = "loops_routines.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff>=0.8"]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0.0.0"  # a source copy without git history
+
 [tool.hatch.build.targets.wheel]
-packages = ["claude_tab"]
+packages = ["loops_routines"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -54,4 +58,4 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "B", "UP"]
 
 [tool.ruff.lint.per-file-ignores]
-"claude_tab/core/notify.py" = ["E501"]  # AppleScript source kept on one line per statement
+"loops_routines/core/notify.py" = ["E501"]  # AppleScript source kept on one line per statement

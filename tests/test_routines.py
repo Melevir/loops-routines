@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from conftest import cfg, routine_text
 
-from claude_tab.core.routines import fill, load_routines, parse_routine
-from claude_tab.install import DEFAULTS
+from loops_routines.core.routines import fill, load_routines, parse_routine
+from loops_routines.install import DEFAULTS
 
 
 def test_parse_full_header():

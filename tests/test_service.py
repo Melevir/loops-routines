@@ -5,11 +5,11 @@ from datetime import timedelta
 import pytest
 from conftest import FakeNotifier, utc, write_routine
 
-from claude_tab.core import paths
-from claude_tab.core.notify import Answer
-from claude_tab.core.runner import Run
-from claude_tab.core.store import Store
-from claude_tab.service import Conflict, Service
+from loops_routines.core import paths
+from loops_routines.core.notify import Answer
+from loops_routines.core.runner import Run
+from loops_routines.core.store import Store
+from loops_routines.service import Conflict, Service
 
 
 class Clock:
@@ -70,7 +70,7 @@ def test_manual_run_end_to_end(setup):
     assert report_file.is_file() and "all ok" in report_file.read_text()
     assert service.snapshot()["five_hour"]["used_percentage"] == 30.0  # from the run's rate_limit_event
     servers = json.loads((paths.runs_dir() / str(run_id) / "mcp.json").read_text())["mcpServers"]
-    assert list(servers) == ["claude_tab"] and servers["claude_tab"]["url"].endswith("/agent/mcp")
+    assert list(servers) == ["loops_routines"] and servers["loops_routines"]["url"].endswith("/agent/mcp")
 
 
 def test_scheduled_run_and_the_previous_report(setup, monkeypatch):

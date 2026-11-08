@@ -8,18 +8,18 @@ from pathlib import Path
 
 import pytest
 
-from claude_tab.core.config import Config, parse
+from loops_routines.core.config import Config, parse
 
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
-    """Every test gets its own ~/.claude_tab, state and logs."""
+    """Every test gets its own ~/.loops_routines, state and logs."""
     home, state, logs = tmp_path / "home", tmp_path / "state", tmp_path / "logs"
     for d in (home, state, logs):
         d.mkdir()
-    monkeypatch.setenv("CLAUDE_TAB_HOME", str(home))
-    monkeypatch.setenv("CLAUDE_TAB_STATE", str(state))
-    monkeypatch.setenv("CLAUDE_TAB_LOGS", str(logs))
+    monkeypatch.setenv("LOOPS_ROUTINES_HOME", str(home))
+    monkeypatch.setenv("LOOPS_ROUTINES_STATE", str(state))
+    monkeypatch.setenv("LOOPS_ROUTINES_LOGS", str(logs))
     return tmp_path
 
 
@@ -36,7 +36,7 @@ def routine_text(header: str, prompt: str = "Do the thing. Last: {last_run_at}")
 
 
 def write_routine(name: str, header: str, prompt: str = "Do the thing. Last: {last_run_at}") -> Path:
-    folder = Path(os.environ["CLAUDE_TAB_HOME"]) / "routines"
+    folder = Path(os.environ["LOOPS_ROUTINES_HOME"]) / "routines"
     folder.mkdir(exist_ok=True)
     path = folder / f"{name}.md"
     path.write_text(routine_text(header, prompt))
@@ -96,7 +96,7 @@ class FakeNotifier:
     async def ask(self, title, question, buttons, timeout_seconds, caution=False):
         import asyncio
 
-        from claude_tab.core.notify import Answer
+        from loops_routines.core.notify import Answer
         self.asks.append((title, question, list(buttons), timeout_seconds))
         if self.block:
             await asyncio.sleep(3600)
@@ -117,7 +117,7 @@ def snapshot(five_used: float, minutes_to_reset: float, week_used: float = 10, a
     now = now or datetime.now(UTC)
     from datetime import timedelta
 
-    from claude_tab.core.clock import to_iso
+    from loops_routines.core.clock import to_iso
     return {"captured_at": to_iso(now - timedelta(minutes=age_minutes)), "source": "probe",
             "five_hour": {"used_percentage": five_used, "resets_at": int(now.timestamp() + minutes_to_reset * 60)},
             "seven_day": {"used_percentage": week_used, "resets_at": int(now.timestamp() + 3 * 86400)}}

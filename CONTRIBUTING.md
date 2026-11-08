@@ -20,9 +20,9 @@ To try a change against a real `claude` without disturbing an installed daemon, 
 another port:
 
 ```bash
-uv run claude-tab --root /tmp/ct install
+uv run loops-routines --root /tmp/ct install
 # set [daemon] port in /tmp/ct/home/config.toml, then:
-uv run claude-tab --root /tmp/ct daemon
+uv run loops-routines --root /tmp/ct daemon
 ```
 
 ## Changes

@@ -4,11 +4,11 @@ import pytest
 from conftest import FakeNotifier, write_routine
 from starlette.testclient import TestClient
 
-from claude_tab.core import paths
-from claude_tab.core.store import Store
-from claude_tab.daemon.app import build_app
-from claude_tab.daemon.auth import ensure_token, host_ok
-from claude_tab.service import Service
+from loops_routines.core import paths
+from loops_routines.core.store import Store
+from loops_routines.daemon.app import build_app
+from loops_routines.daemon.auth import ensure_token, host_ok
+from loops_routines.service import Service
 
 TOKEN = "test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}

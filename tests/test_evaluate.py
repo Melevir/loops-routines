@@ -1,8 +1,8 @@
 from conftest import cfg, routine_text, snapshot, utc
 
-from claude_tab.core.evaluate import evaluate
-from claude_tab.core.routines import parse_routine
-from claude_tab.core.usage import gate, wind_down_reason
+from loops_routines.core.evaluate import evaluate
+from loops_routines.core.routines import parse_routine
+from loops_routines.core.usage import gate, wind_down_reason
 
 FRESH = None  # filled per test with snapshot(...)
 
