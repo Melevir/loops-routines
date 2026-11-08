@@ -26,8 +26,8 @@ Needs macOS, [uv](https://docs.astral.sh/uv/) and [Claude Code](https://claude.c
 on your `PATH`, signed in).
 
 ```bash
-uv tool install loops-routines       # from PyPI: the `loops-routines` command in ~/.local/bin
-loops-routines install --launchd --mcp   # ~/.loops_routines, the daemon as a LaunchAgent, the MCP server in Claude Code
+brew install melevir/tap/loops-routines   # or, with uv: uv tool install loops-routines
+loops-routines install --launchd --mcp    # ~/.loops_routines, the daemon as a LaunchAgent, the MCP server in Claude Code
 loops-routines status
 ```
 
@@ -39,11 +39,11 @@ whose `PATH` finds `claude` and whatever your routines call: the LaunchAgent kee
 Upgrade, then restart the daemon so it runs the new code:
 
 ```bash
-uv tool upgrade loops-routines
+brew upgrade loops-routines     # or: uv tool upgrade loops-routines
 loops-routines restart
 ```
 
-Remove: `loops-routines uninstall` (the LaunchAgent; `~/.loops_routines` is kept), then `uv tool uninstall loops-routines`.
+Remove: `loops-routines uninstall` (the LaunchAgent; `~/.loops_routines` is kept), then `brew uninstall loops-routines` (or `uv tool uninstall loops-routines`).
 
 ### Before you start
 
