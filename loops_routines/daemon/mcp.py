@@ -28,6 +28,11 @@ anyway, a log monitor every half hour. Routines are files in ~/.loops_routines/r
 between +++ lines, the prompt below). list_routines shows each one's state (running, waiting and why,
 idle with its next run); get_run gives a run's result and report. run_routine starts one now within the
 rules (free slot, its usage limits); run_routine_now starts it at once, outside the queue.
+
+Scenarios are multi-step workflows over many items (e.g. babysitting pull requests), folders in
+~/.loops_routines/scenarios/: a `select` program decides each item's next step without an LLM.
+list_scenarios and scenario_status show them and their items; track_item / untrack_item choose the items;
+press_item_button and pause_item act on one.
 """
 
 AGENT_INSTRUCTIONS = """\
@@ -156,6 +161,85 @@ def user_server(service: Service) -> MCPServer:
             answer: One of the question's buttons, exactly as listed (any case).
         """
         return await _call(service.answer_question, question_id, answer)
+
+    # --- scenarios --------------------------------------------------------------------
+
+    @server.tool()
+    async def list_scenarios() -> list[dict]:
+        """Every scenario (a multi-step workflow over many items, e.g. PRs): selecting, idle, error (with
+        the select's error), disabled or broken; its item counts by last decision and its steps."""
+        return await _call(service.scenarios.list_scenarios)
+
+    @server.tool()
+    async def scenario_status(name: str, include_done: bool = False) -> dict:
+        """One scenario in full: settings, steps, last select and every item it follows with its last
+        decision (wait, notify, done, ...), reason, buttons and whether it is paused.
+
+        Args:
+            name: The scenario's folder name.
+            include_done: True also lists items it no longer follows.
+        """
+        return await _call(service.scenarios.scenario_detail, name, include_done)
+
+    @server.tool()
+    async def set_scenario_enabled(name: str, enabled: bool | None) -> dict:
+        """Switch a scenario on or off (kept by the daemon over its scenario.toml); null goes back to the file.
+
+        Args:
+            name: The scenario's folder name.
+            enabled: true, false, or null for "as scenario.toml says".
+        """
+        return await _call(service.scenarios.set_enabled, name, enabled)
+
+    @server.tool()
+    async def run_scenario_select(name: str) -> dict:
+        """Run a scenario's select now (it decides every item's next step) and wait for it."""
+        return await _call(service.scenarios.select_now, name)
+
+    @server.tool()
+    async def scenario_item(name: str, key: str) -> dict:
+        """One item of a scenario: its state, last decision, buttons and history (decisions, notices,
+        button presses).
+
+        Args:
+            name: The scenario's folder name.
+            key: The item's key as the scenario lists it, e.g. "owner/repo#123".
+        """
+        return await _call(service.scenarios.item_detail, name, key)
+
+    @server.tool()
+    async def track_item(name: str, key: str, title: str | None = None, url: str | None = None) -> dict:
+        """Ask a scenario to look after an item (or again, after it was done); its select runs at once.
+
+        Args:
+            name: The scenario's folder name.
+            key: The item's key in the form the scenario expects (its README says), e.g. "owner/repo#123".
+            title: Optional display title.
+            url: Optional link.
+        """
+        return await _call(service.scenarios.track, name, key, title, url)
+
+    @server.tool()
+    async def untrack_item(name: str, key: str) -> dict:
+        """Stop a scenario following an item (it becomes done; track_item brings it back)."""
+        return await _call(service.scenarios.untrack, name, key)
+
+    @server.tool()
+    async def press_item_button(name: str, key: str, button: str) -> dict:
+        """Press one of an item's buttons on the user's behalf, only when the user told you to: the
+        scenario's select sees the press at once (e.g. "sent_for_review").
+
+        Args:
+            name: The scenario's folder name.
+            key: The item's key.
+            button: One of the item's buttons as listed (any case).
+        """
+        return await _call(service.scenarios.press, name, key, button)
+
+    @server.tool()
+    async def pause_item(name: str, key: str, paused: bool = True) -> dict:
+        """Pause an item (its select keeps deciding, nothing is done for it) or resume it."""
+        return await _call(service.scenarios.pause, name, key, paused)
 
     return server
 

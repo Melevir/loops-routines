@@ -35,6 +35,10 @@ def routines_dir() -> Path:
     return home_dir() / "routines"
 
 
+def scenarios_dir() -> Path:
+    return home_dir() / "scenarios"
+
+
 def db_path() -> Path:
     return state_dir() / "state.db"
 

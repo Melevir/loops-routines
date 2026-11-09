@@ -5,6 +5,10 @@
                    enabled switch from the UI (NULL = as the file says)
     runs           every run and every skipped occurrence (state = skipped), with its result
     run_messages   what agents posted while they ran (report_status, report_blocker)
+    scenario_state per scenario: the enabled switch from the UI, the last select and its error
+    items          per scenario and item key: the selector's state and last decision, tracked, paused
+    item_events    what happened to an item: button presses and tracking (handed to the next select),
+                   notices sent, decisions made
 """
 
 import json
@@ -56,7 +60,54 @@ SCHEMA = [
         UNIQUE (run_id, key)
     );
     """,
+    """
+    CREATE TABLE scenario_state (
+        name TEXT PRIMARY KEY,
+        first_seen_at TEXT NOT NULL,
+        enabled INTEGER,                 -- the switch from the UI; NULL = as scenario.toml says
+        last_select_at TEXT,
+        last_select_ok_at TEXT,
+        last_error TEXT,
+        last_problems TEXT NOT NULL DEFAULT '[]',
+        last_duration_ms INTEGER
+    );
+    CREATE TABLE items (
+        scenario TEXT NOT NULL,
+        key TEXT NOT NULL,
+        title TEXT,
+        url TEXT,
+        state TEXT NOT NULL DEFAULT '{}',   -- the selector's memory for this item
+        action TEXT,                     -- the last decision: run | apply | wait | notify | ask | done
+        step TEXT,
+        reason TEXT NOT NULL DEFAULT '',
+        version TEXT,
+        notice TEXT,                     -- the last notification's kind and text, for the UI
+        buttons TEXT NOT NULL DEFAULT '[]',
+        notified TEXT NOT NULL DEFAULT '{}',  -- notify kind -> the once_per it was sent for
+        tracked INTEGER NOT NULL DEFAULT 0,   -- added by a person (track), not only found by select
+        paused INTEGER NOT NULL DEFAULT 0,
+        done_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (scenario, key)
+    );
+    CREATE TABLE item_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scenario TEXT NOT NULL,
+        key TEXT NOT NULL,
+        kind TEXT NOT NULL,              -- button | track | notice | decision
+        name TEXT,
+        data TEXT,
+        at TEXT NOT NULL,
+        consumed_at TEXT                 -- when a select saw it (button, track); NULL = not yet
+    );
+    CREATE INDEX item_events_item ON item_events (scenario, key, id);
+    """,
 ]
+
+ITEM_JSON = ("state", "buttons", "notified")
+ITEM_FIELDS = {"title", "url", "state", "action", "step", "reason", "version", "notice", "buttons", "notified",
+               "tracked", "paused", "done_at"}
 
 
 class Store:
@@ -196,6 +247,82 @@ class Store:
             self._db.executemany("DELETE FROM runs WHERE id = ?", [(i,) for i in old])
         return len(old)
 
+    # --- scenarios -------------------------------------------------------------------
+
+    def ensure_scenario(self, name: str, now: str) -> None:
+        self._exec("INSERT OR IGNORE INTO scenario_state (name, first_seen_at) VALUES (?, ?)", name, now)
+
+    def scenario_state(self, name: str) -> dict:
+        row = self._one("SELECT * FROM scenario_state WHERE name = ?", name) or {}
+        if row:
+            row["last_problems"] = json.loads(row["last_problems"] or "[]")
+        return row
+
+    def set_scenario_enabled(self, name: str, enabled: bool | None) -> None:
+        self._exec("UPDATE scenario_state SET enabled = ? WHERE name = ?",
+                   None if enabled is None else int(bool(enabled)), name)
+
+    def record_select(self, name: str, at: str, *, error: str | None, problems=(), duration_ms: int) -> None:
+        self._exec("UPDATE scenario_state SET last_select_at = ?, last_error = ?, last_problems = ?, "
+                   "last_duration_ms = ?, last_select_ok_at = CASE WHEN ? IS NULL THEN ? ELSE last_select_ok_at END "
+                   "WHERE name = ?", at, error, json.dumps(list(problems)), duration_ms, error, at, name)
+
+    def items(self, scenario: str, include_done: bool = False) -> list[dict]:
+        sql = "SELECT * FROM items WHERE scenario = ?" + ("" if include_done else " AND done_at IS NULL")
+        return [_item(r) for r in self._all(sql + " ORDER BY created_at, key", scenario)]
+
+    def item(self, scenario: str, key: str) -> dict | None:
+        row = self._one("SELECT * FROM items WHERE scenario = ? AND key = ?", scenario, key)
+        return _item(row) if row else None
+
+    def put_item(self, scenario: str, key: str, now: str, **values) -> dict:
+        """Create the item if new, then set the given fields (JSON ones as Python values)."""
+        unknown = set(values) - ITEM_FIELDS
+        if unknown:
+            raise ValueError(f"unknown item fields: {', '.join(sorted(unknown))}")
+        with self._lock:
+            self._exec("INSERT OR IGNORE INTO items (scenario, key, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                       scenario, key, now, now)
+            if values:
+                sets = ", ".join(f"{name} = ?" for name in values)
+                params = [json.dumps(v) if name in ITEM_JSON else v for name, v in values.items()]
+                self._exec(f"UPDATE items SET {sets}, updated_at = ? WHERE scenario = ? AND key = ?",
+                           *params, now, scenario, key)
+            return self.item(scenario, key)
+
+    def delete_item(self, scenario: str, key: str) -> None:
+        with self._lock:
+            self._exec("DELETE FROM items WHERE scenario = ? AND key = ?", scenario, key)
+            self._exec("DELETE FROM item_events WHERE scenario = ? AND key = ?", scenario, key)
+
+    def add_event(self, scenario: str, key: str, kind: str, now: str, name: str | None = None,
+                  data: dict | None = None, consumed: bool = False) -> int:
+        cur = self._exec("INSERT INTO item_events (scenario, key, kind, name, data, at, consumed_at) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?)", scenario, key, kind, name,
+                         json.dumps(data) if data is not None else None, now, now if consumed else None)
+        return cur.lastrowid
+
+    def pending_events(self, scenario: str) -> list[dict]:
+        return [_event(r) for r in self._all("SELECT * FROM item_events WHERE scenario = ? AND consumed_at IS NULL "
+                                             "ORDER BY id", scenario)]
+
+    def consume_events(self, event_ids: list[int], now: str) -> None:
+        with self._lock:
+            self._db.executemany("UPDATE item_events SET consumed_at = ? WHERE id = ?", [(now, i) for i in event_ids])
+
+    def item_events(self, scenario: str, key: str, limit: int = 50) -> list[dict]:
+        return [_event(r) for r in self._all("SELECT * FROM item_events WHERE scenario = ? AND key = ? "
+                                             "ORDER BY id DESC LIMIT ?", scenario, key, limit)]
+
+    def prune_items(self, before: str) -> int:
+        """Items done before `before`, with their events."""
+        with self._lock:
+            old = self._all("SELECT scenario, key FROM items WHERE done_at IS NOT NULL AND done_at < ?", before)
+            for row in old:
+                self.delete_item(row["scenario"], row["key"])
+            self._exec("DELETE FROM item_events WHERE consumed_at IS NOT NULL AND at < ?", before)
+        return len(old)
+
     # --- messages from running agents ------------------------------------------------
 
     def put_message(self, run_id: int, key: str | None, kind: str, text: str, now: str,
@@ -230,4 +357,16 @@ def _run(row: dict) -> dict:
 
 def _message(row: dict) -> dict:
     row["report"] = json.loads(row["report"]) if row.get("report") else None
+    return row
+
+
+def _item(row: dict) -> dict:
+    for key in ITEM_JSON:
+        row[key] = json.loads(row[key]) if row.get(key) else ({} if key != "buttons" else [])
+    row["tracked"], row["paused"] = bool(row["tracked"]), bool(row["paused"])
+    return row
+
+
+def _event(row: dict) -> dict:
+    row["data"] = json.loads(row["data"]) if row.get("data") else None
     return row

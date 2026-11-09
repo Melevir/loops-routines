@@ -28,6 +28,10 @@ from loops_routines.core.runner import Run, RunResult, RunSpec
 from loops_routines.core.triggers import fmt_duration
 from loops_routines.core.usage import Gate, age_minutes, free, gate, wind_down_reason
 from loops_routines.core.windows import zone
+from loops_routines.errors import Conflict, NotFound
+from loops_routines.scenario_engine import ScenarioEngine
+
+__all__ = ["Conflict", "NotFound", "Service"]
 
 MESSAGE_KINDS = ("info", "progress", "success", "warning", "error")
 BLOCKER_CATEGORIES = ("mcp_not_authenticated", "mcp_unavailable", "plugin_missing", "skill_missing",
@@ -35,14 +39,6 @@ BLOCKER_CATEGORIES = ("mcp_not_authenticated", "mcp_unavailable", "plugin_missin
 MAX_TEXT = 280
 MAX_PREVIOUS_REPORT = 20_000
 MAX_EXPIRES_PER_TICK = 50
-
-
-class NotFound(LookupError):
-    pass
-
-
-class Conflict(RuntimeError):
-    """The action can't happen in the current state (already running, no free slot, ...)."""
 
 
 @dataclass
@@ -138,6 +134,7 @@ class Service:
         self._background: set[asyncio.Task] = set()
         self._lock = asyncio.Lock()  # one tick at a time
         self.reload(force=True)
+        self.scenarios = ScenarioEngine(self)
 
     # --- setup ---------------------------------------------------------------------
 
@@ -334,6 +331,10 @@ class Service:
         cooldown = timedelta(minutes=self.cfg.daemon.probe_cooldown_minutes)
         if wants_probe and not problem and (self.last_probe_at is None or now - self.last_probe_at >= cooldown):
             self.start_probe()
+        try:
+            self.scenarios.tick(now)
+        except Exception:  # a scenario's trouble never stops the routines
+            traceback.print_exc()
 
     def _guard_running(self, now) -> None:
         snapshot = self.snapshot()
@@ -523,6 +524,7 @@ class Service:
     def health(self) -> dict:
         return {"service": "loops-routines", "version": __version__, "pid": os.getpid(), "started_at": self.started_at,
                 "port": self.port, "routines": len(self.routines), "broken": len(self.broken),
+                "scenarios": len(self.scenarios.scenarios), "broken_scenarios": len(self.scenarios.broken),
                 "running": len(self.active), "max_parallel": self.cfg.daemon.max_parallel,
                 "unseen_alerts": self.store.unseen_alerts(), "problems": list(self.cfg.problems),
                 "account_problem": account_problem(self.cfg.agent)}
@@ -530,7 +532,8 @@ class Service:
     def summary(self) -> dict:
         """Everything the UI's main view needs, in one call."""
         return {"health": self.health(), "usage": self.usage_view(), "routines": self.list_routines(),
-                "runs": self.list_runs(limit=30), "questions": self.pending_questions()}
+                "runs": self.list_runs(limit=30), "questions": self.pending_questions(),
+                "scenarios": self.scenarios.list_scenarios()}
 
     # --- actions ----------------------------------------------------------------------------
 
@@ -781,8 +784,10 @@ class Service:
     def _prune(self) -> None:
         cutoff = clock.to_iso(self._now() - timedelta(days=self.cfg.daemon.keep_runs_days))
         self.store.prune(cutoff)
+        self.store.prune_items(cutoff)
 
     async def shutdown(self) -> None:
+        await self.scenarios.shutdown()
         for active in list(self.active.values()):
             active.run.stop()
         tasks = [a.task for a in self.active.values() if a.task]

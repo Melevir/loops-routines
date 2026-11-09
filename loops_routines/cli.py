@@ -22,6 +22,17 @@
     loops-routines install [--launchd] [--mcp]   set up ~/.loops_routines, the LaunchAgent, the MCP registration
     loops-routines restart                   restart the LaunchAgent's daemon (after an upgrade)
     loops-routines uninstall                 remove the LaunchAgent
+
+    loops-routines scenarios                 every scenario and its state
+    loops-routines scenario show NAME [--done]          one scenario and the items it follows
+    loops-routines scenario enable|disable|reset NAME   switch it on / off / back to scenario.toml
+    loops-routines scenario select NAME                 run its select now and show the result
+    loops-routines scenario item NAME KEY               one item: state, decision, history
+    loops-routines scenario track NAME KEY [--title T] [--url U]   follow an item
+    loops-routines scenario untrack NAME KEY            stop following it
+    loops-routines scenario press NAME KEY BUTTON       press one of the item's buttons
+    loops-routines scenario pause|resume NAME KEY       nothing is done for a paused item
+    loops-routines scenario check DIR                   validate a scenario folder without the daemon
 """
 
 import argparse
@@ -109,6 +120,27 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--mcp", action="store_true", help="register the MCP server in Claude Code")
     sub.add_parser("restart")
     sub.add_parser("uninstall")
+    sub.add_parser("scenarios")
+    sc = sub.add_parser("scenario").add_subparsers(dest="scenario_command", required=True)
+    p = sc.add_parser("show")
+    p.add_argument("name")
+    p.add_argument("--done", action="store_true", help="also the items it no longer follows")
+    for name in ("enable", "disable", "reset", "select"):
+        sc.add_parser(name).add_argument("name")
+    for name in ("item", "untrack", "pause", "resume"):
+        p = sc.add_parser(name)
+        p.add_argument("name")
+        p.add_argument("key")
+    p = sc.add_parser("track")
+    p.add_argument("name")
+    p.add_argument("key")
+    p.add_argument("--title")
+    p.add_argument("--url")
+    p = sc.add_parser("press")
+    p.add_argument("name")
+    p.add_argument("key")
+    p.add_argument("button", nargs="+")
+    sc.add_parser("check").add_argument("folder")
     args = parser.parse_args(argv)
     if args.root:
         root = os.path.abspath(os.path.expanduser(args.root))
@@ -151,8 +183,14 @@ def _dispatch(args, parser) -> None:
     if command == "check":
         _check(args.file)
         return
+    if command == "scenario" and args.scenario_command == "check":
+        _check_scenario(args.folder)
+        return
 
     client = Client()
+    if command in ("scenarios", "scenario"):
+        _scenario(client, args)
+        return
     if command == "open":
         url = f"{client.base_url}/ui/#token={client.token}"
         webbrowser.open(url)
@@ -257,6 +295,95 @@ def _usage_line(usage: dict) -> str:
     if usage.get("probe", {}).get("error"):
         parts.append(f"probe: {usage['probe']['error']}")
     return "  ".join(parts)
+
+
+def _scenario(client: Client, args) -> None:
+    if args.command == "scenarios":
+        result = client.get("/api/scenarios")
+        if args.json:
+            _print_json(result)
+            return
+        for s in result:
+            print(_scenario_line(s))
+        if not result:
+            print("no scenarios: add a folder to ~/.loops_routines/scenarios/")
+        return
+    command, base = args.scenario_command, f"/api/scenarios/{args.name}"
+    key = getattr(args, "key", None)
+    result = {
+        "show": lambda: client.get(base, done="1" if args.done else None),
+        "enable": lambda: client.post(f"{base}/enabled", {"enabled": True}),
+        "disable": lambda: client.post(f"{base}/enabled", {"enabled": False}),
+        "reset": lambda: client.post(f"{base}/enabled", {"enabled": None}),
+        "select": lambda: client.post(f"{base}/select", timeout=660),
+        "item": lambda: client.get(f"{base}/item", key=key),
+        "track": lambda: client.post(f"{base}/items", {"key": key, "title": args.title, "url": args.url}),
+        "untrack": lambda: client.post(f"{base}/item/untrack", {"key": key}),
+        "press": lambda: client.post(f"{base}/item/press", {"key": key, "button": " ".join(args.button)}),
+        "pause": lambda: client.post(f"{base}/item/pause", {"key": key, "paused": True}),
+        "resume": lambda: client.post(f"{base}/item/pause", {"key": key, "paused": False}),
+    }[command]()
+    if args.json or command in ("item",):
+        _print_json(result)
+        return
+    if command in ("show", "select"):
+        print(_scenario_line(result))
+        for problem in result.get("problems") or []:
+            print(f"  ! {problem}")
+        if result.get("steps"):
+            print(f"  steps: {', '.join(result['steps'])}")
+        print()
+        for item in result.get("item_list") or []:
+            print(_item_line(item))
+        if not result.get("item_list"):
+            print("no items yet")
+        return
+    if command in ("enable", "disable", "reset"):
+        print(_scenario_line(result))
+        return
+    if command == "press":
+        print(f"pressed {result['pressed']} on {result['key']}: its select runs now")
+        return
+    print(_item_line(result))
+
+
+def _scenario_line(s: dict) -> str:
+    if s["state"] == "broken":
+        return f"{s['name']:<22} broken    {s.get('error') or ''}"
+    counts = ", ".join(f"{n} {a}" for a, n in sorted((s.get("by_action") or {}).items()))
+    detail = s.get("error") if s["state"] == "error" else f"every {s['select_every']}, last {_local(s.get('last_select_at'))}"
+    return f"{s['name']:<22} {s['state']:<9} {s['items']} items{f' ({counts})' if counts else ''}  {detail}"[:220]
+
+
+def _item_line(i: dict) -> str:
+    what = (i.get("action") or "new") + (f" {i['step']}" if i.get("step") else "")
+    flags = "".join(f" [{f}]" for f, on in (("tracked", i.get("tracked")), ("paused", i.get("paused")),
+                                            ("done", i.get("done_at"))) if on)
+    buttons = f"  buttons: {' | '.join(i['buttons'])}" if i.get("buttons") else ""
+    return f"{i['key']:<28} {what:<16} {i.get('reason') or ''}{flags}{buttons}"[:240]
+
+
+def _check_scenario(folder: str) -> None:
+    from pathlib import Path
+
+    from loops_routines.core.scenarios import parse_scenario
+    path = Path(folder).expanduser()
+    try:
+        sc = parse_scenario(path)
+    except (ValueError, OSError) as exc:
+        print(f"{path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    from datetime import timedelta
+
+    from loops_routines.core.triggers import fmt_duration
+    print(f"{sc.name}: ok — {sc.title}, select every {fmt_duration(timedelta(seconds=sc.select_every))}, "
+          f"{'on' if sc.enabled else 'off'}")
+    print(f"  steps: {', '.join(sc.steps) or 'none'}   apply: {'yes' if sc.has_apply else 'no'}   "
+          f"max_items {sc.max_items}   max_attempts {sc.max_attempts}")
+    if sc.settings:
+        print(f"  settings: {', '.join(f'{k}={v!r}' for k, v in sc.settings.items())}")
+    for problem in sc.problems:
+        print(f"  ! {problem}")
 
 
 def _check(file: str) -> None:

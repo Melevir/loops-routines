@@ -56,7 +56,7 @@ def test_routines_and_errors(client):
     assert client.post("/api/routines/mon/enabled", headers=AUTH, json={"enabled": False}).json()["enabled"] is False
     assert client.post("/api/routines/mon/enabled", headers=AUTH, json={"enabled": None}).json()["enabled"] is True
     summary = client.get("/api/summary", headers=AUTH).json()
-    assert set(summary) == {"health", "usage", "routines", "runs", "questions"}
+    assert set(summary) == {"health", "usage", "routines", "runs", "questions", "scenarios"}
     assert client.get("/api/questions", headers=AUTH).json() == []
     assert client.post("/api/questions/9/answer", headers=AUTH, json={"answer": "Yes"}).status_code == 404
     assert client.post("/api/notify/test", headers=AUTH, json={"kind": "error"}).json()["shown"] is True

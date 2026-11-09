@@ -14,7 +14,13 @@
     GET  /api/questions                   POST /api/questions/{id}/answer {answer}
     POST /api/notify/test {kind, ask}     a banner, or a dialog that waits for the click
     POST /api/reload
-    GET  /api/events                      Server-Sent Events: run.*, routine.*, routines.*, question.*, usage.updated
+    GET  /api/scenarios                   GET  /api/scenarios/{name}?done=1
+    POST /api/scenarios/{name}/enabled {enabled}   POST /api/scenarios/{name}/select  (runs it, waits)
+    GET  /api/scenarios/{name}/items?done=1        POST /api/scenarios/{name}/items {key, title, url}  (track)
+    GET  /api/scenarios/{name}/item?key=           POST /api/scenarios/{name}/item/untrack {key}
+    POST /api/scenarios/{name}/item/press {key, button}   POST /api/scenarios/{name}/item/pause {key, paused}
+    GET  /api/events                      Server-Sent Events: run.*, routine.*, routines.*, question.*, usage.updated,
+                                          scenario.*, scenarios.*, item.updated
     /mcp, /agent/mcp                      see daemon.mcp
 """
 
@@ -181,8 +187,59 @@ def build_app(service: Service, *, token: str | None = None, run_scheduler: bool
     @endpoint
     async def reload(request):
         changed = s.reload(force=True)
+        s.scenarios.reload(force=True)
         await s.tick()
-        return {"reloaded": changed, "routines": len(s.routines), "broken": len(s.broken)}
+        return {"reloaded": changed, "routines": len(s.routines), "broken": len(s.broken),
+                "scenarios": len(s.scenarios.scenarios)}
+
+    # --- scenarios (item keys travel in the body or the query: they hold / and #) ---
+
+    def _done(request) -> bool:
+        return request.query_params.get("done", "0") not in ("0", "false", "no", "")
+
+    @endpoint
+    def scenarios(request):
+        return s.scenarios.list_scenarios()
+
+    @endpoint
+    def scenario(request):
+        return s.scenarios.scenario_detail(request.path_params["name"], _done(request))
+
+    @endpoint
+    async def scenario_enabled(request):
+        body = await _body(request)
+        if "enabled" not in body or body["enabled"] not in (True, False, None):
+            raise ValueError("send {\"enabled\": true | false | null}")
+        return s.scenarios.set_enabled(request.path_params["name"], body["enabled"])
+
+    @endpoint
+    async def scenario_select(request):
+        return await s.scenarios.select_now(request.path_params["name"])
+
+    @endpoint
+    async def scenario_items(request):
+        name = request.path_params["name"]
+        if request.method == "POST":
+            body = await _body(request)
+            return s.scenarios.track(name, str(body.get("key") or ""), body.get("title"), body.get("url"))
+        return s.scenarios.list_items(name, _done(request))
+
+    @endpoint
+    def scenario_item(request):
+        return s.scenarios.item_detail(request.path_params["name"], request.query_params.get("key") or "")
+
+    @endpoint
+    async def scenario_item_action(request):
+        name, action = request.path_params["name"], request.path_params["action"]
+        body = await _body(request)
+        key = str(body.get("key") or "")
+        if action == "untrack":
+            return s.scenarios.untrack(name, key)
+        if action == "press":
+            return s.scenarios.press(name, key, str(body.get("button") or ""))
+        if action == "pause":
+            return s.scenarios.pause(name, key, bool(body.get("paused", True)))
+        raise KeyError(f"no item action {action!r}: untrack, press or pause")
 
     async def events(request: Request) -> Response:
         queue = s.bus.subscribe()
@@ -246,6 +303,13 @@ def build_app(service: Service, *, token: str | None = None, run_scheduler: bool
         Route("/api/integrations", integrations),
         Route("/api/integrations/scan", scan, methods=["POST"]),
         Route("/api/reload", reload, methods=["POST"]),
+        Route("/api/scenarios", scenarios),
+        Route("/api/scenarios/{name}", scenario),
+        Route("/api/scenarios/{name}/enabled", scenario_enabled, methods=["POST"]),
+        Route("/api/scenarios/{name}/select", scenario_select, methods=["POST"]),
+        Route("/api/scenarios/{name}/items", scenario_items, methods=["GET", "POST"]),
+        Route("/api/scenarios/{name}/item", scenario_item),
+        Route("/api/scenarios/{name}/item/{action}", scenario_item_action, methods=["POST"]),
         Route("/api/events", events),
         *user_mcp_app.routes,
         *agent_mcp_app.routes,

@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Scenarios, first part: multi-step workflows over many items, as folders in
+  `~/.loops_routines/scenarios/`. A `select` program decides each item's next step without an LLM;
+  the daemon runs it on a schedule, keeps each item's state, sends notifications once, and takes
+  button presses. `loops-routines scenarios` / `scenario …`, MCP tools and REST endpoints to see and
+  steer them. Agent steps come next. See [docs/design/scenarios.md](docs/design/scenarios.md).
+
 ## [0.1.0] - 2026-11-08
 
 The first release.
