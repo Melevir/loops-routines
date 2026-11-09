@@ -32,6 +32,8 @@
     loops-routines scenario untrack NAME KEY            stop following it
     loops-routines scenario press NAME KEY BUTTON       press one of the item's buttons
     loops-routines scenario pause|resume NAME KEY       nothing is done for a paused item
+    loops-routines scenario run NAME KEY STEP [--force] start a step for the item now
+    loops-routines scenario step NAME STEP on|off|reset switch one step on / off / back to its file
     loops-routines scenario check DIR                   validate a scenario folder without the daemon
 """
 
@@ -140,6 +142,15 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("name")
     p.add_argument("key")
     p.add_argument("button", nargs="+")
+    p = sc.add_parser("run")
+    p.add_argument("name")
+    p.add_argument("key")
+    p.add_argument("step")
+    p.add_argument("--force", action="store_true", help="even when the step's usage limits say no")
+    p = sc.add_parser("step")
+    p.add_argument("name")
+    p.add_argument("step")
+    p.add_argument("switch", choices=("on", "off", "reset"))
     sc.add_parser("check").add_argument("folder")
     args = parser.parse_args(argv)
     if args.root:
@@ -322,6 +333,9 @@ def _scenario(client: Client, args) -> None:
         "press": lambda: client.post(f"{base}/item/press", {"key": key, "button": " ".join(args.button)}),
         "pause": lambda: client.post(f"{base}/item/pause", {"key": key, "paused": True}),
         "resume": lambda: client.post(f"{base}/item/pause", {"key": key, "paused": False}),
+        "run": lambda: client.post(f"{base}/item/run", {"key": key, "step": args.step, "force": args.force}),
+        "step": lambda: client.post(f"{base}/steps/{getattr(args, 'step', '')}/enabled",
+                                    {"enabled": {"on": True, "off": False, "reset": None}[getattr(args, "switch", "reset")]}),
     }[command]()
     if args.json or command in ("item",):
         _print_json(result)
@@ -330,16 +344,22 @@ def _scenario(client: Client, args) -> None:
         print(_scenario_line(result))
         for problem in result.get("problems") or []:
             print(f"  ! {problem}")
-        if result.get("steps"):
-            print(f"  steps: {', '.join(result['steps'])}")
+        for step in result.get("step_list") or []:
+            print(f"  step {step['name']:<16} {'on ' if step['enabled'] else 'off'}{' (switched)' if step['switched'] else ''}"
+                  f"  {step['model'] or 'default model'}, {step['profile']}, priority {step['priority']}, "
+                  f"max {step['max_runtime']}")
         print()
         for item in result.get("item_list") or []:
             print(_item_line(item))
         if not result.get("item_list"):
             print("no items yet")
         return
-    if command in ("enable", "disable", "reset"):
+    if command in ("enable", "disable", "reset", "step"):
         print(_scenario_line(result))
+        return
+    if command == "run":
+        print(f"started {result['step']} for {result['key']}: run {result['run_id']} "
+              f"(loops-routines get {result['run_id']})")
         return
     if command == "press":
         print(f"pressed {result['pressed']} on {result['key']}: its select runs now")
@@ -360,16 +380,18 @@ def _item_line(i: dict) -> str:
     flags = "".join(f" [{f}]" for f, on in (("tracked", i.get("tracked")), ("paused", i.get("paused")),
                                             ("done", i.get("done_at"))) if on)
     buttons = f"  buttons: {' | '.join(i['buttons'])}" if i.get("buttons") else ""
-    return f"{i['key']:<28} {what:<16} {i.get('reason') or ''}{flags}{buttons}"[:240]
+    queue = f" · {i['queue']}" if i.get("queue") else ""
+    return f"{i['key']:<28} {what:<16} {i.get('reason') or ''}{queue}{flags}{buttons}"[:240]
 
 
 def _check_scenario(folder: str) -> None:
     from pathlib import Path
 
+    from loops_routines.core import config
     from loops_routines.core.scenarios import parse_scenario
     path = Path(folder).expanduser()
     try:
-        sc = parse_scenario(path)
+        sc = parse_scenario(path, config.load())
     except (ValueError, OSError) as exc:
         print(f"{path}: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -382,6 +404,9 @@ def _check_scenario(folder: str) -> None:
           f"max_items {sc.max_items}   max_attempts {sc.max_attempts}")
     if sc.settings:
         print(f"  settings: {', '.join(f'{k}={v!r}' for k, v in sc.settings.items())}")
+    for step, spec in sc.specs.items():
+        print(f"  step {step}: {spec.model or 'default model'}, profile {spec.profile}, "
+              f"max_runtime {fmt_duration(spec.max_runtime)}{'' if spec.enabled else ', off'}")
     for problem in sc.problems:
         print(f"  ! {problem}")
 

@@ -4,7 +4,7 @@ A scenario is a folder, ~/.loops_routines/scenarios/<name>/:
 
     scenario.toml   title, how often `select` runs, limits, step defaults, settings (+ their schema)
     select          executable: JSON in on stdin (items, their state, events), JSON out (one decision each)
-    steps/*.md      the agent steps (run in a later version; listed now)
+    steps/*.md      the agent steps: a routine header without a schedule, and a prompt
     apply           executable, optional (used in a later version)
 
 This module is pure apart from run_select: parsing, validation, the select contract and state merging.
@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
+from loops_routines.core.config import Config
+from loops_routines.core.routines import STEP_KEYS, Routine, build_routine, read_header
 from loops_routines.core.triggers import fmt_duration, parse_duration
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -28,7 +30,7 @@ KNOWN_KEYS = {"title", "select_every", "select_timeout", "enabled", "max_items",
               "settings"}
 SCHEMA_TYPES = {"int": int, "float": (int, float), "str": str, "bool": bool, "list": list}
 ACTIONS = ("run", "apply", "wait", "notify", "ask", "done")
-LATER_ACTIONS = {"run": "agent steps", "apply": "apply hooks", "ask": "questions"}  # not executed yet
+LATER_ACTIONS = {"apply": "apply hooks", "ask": "questions"}  # not executed yet
 NOTICE_KINDS = ("info", "success", "warning", "error")
 MIN_SELECT_EVERY = 60
 MAX_KEY = 200
@@ -54,6 +56,7 @@ class Scenario:
     steps: tuple[str, ...]
     has_apply: bool
     problems: tuple[str, ...] = ()  # usable, but worth a look
+    specs: dict = field(default_factory=dict, compare=False)  # step -> Routine (when parsed with a config)
 
     @property
     def select_path(self) -> Path:
@@ -71,8 +74,9 @@ class BrokenScenario:
     error: str
 
 
-def parse_scenario(folder: Path) -> Scenario:
-    """A scenario folder -> Scenario; ValueError with what to fix when it can't be used."""
+def parse_scenario(folder: Path, cfg: Config | None = None) -> Scenario:
+    """A scenario folder -> Scenario; ValueError with what to fix when it can't be used. With a config the
+    step files are parsed too (their profiles live in it), and a broken step makes the scenario broken."""
     folder = Path(folder)
     name = folder.name
     if not NAME_RE.match(name):
@@ -128,10 +132,42 @@ def parse_scenario(folder: Path) -> Scenario:
     title = raw.get("title") or name
     if not isinstance(title, str):
         raise ValueError("title must be text")
+    unknown = set(defaults) - STEP_KEYS
+    if unknown:
+        raise ValueError(f"[defaults]: unknown keys {', '.join(sorted(unknown))} (a step's header keys only)")
+    specs = {}
+    if cfg is not None:
+        for step in steps:
+            try:
+                specs[step] = parse_step(name, title, step, (steps_dir / f"{step}.md").read_text(encoding="utf-8"),
+                                         defaults, cfg, str(steps_dir / f"{step}.md"))
+            except (ValueError, OSError, UnicodeDecodeError) as exc:
+                raise ValueError(f"steps/{step}.md: {exc}") from None
     return Scenario(name=name, title=title, path=str(folder), select_every=every, select_timeout=timeout,
                     enabled=enabled, max_items=max_items, max_attempts=max_attempts, defaults=defaults,
                     settings=settings, schema=schema, steps=tuple(steps), has_apply=apply.is_file(),
-                    problems=tuple(problems))
+                    problems=tuple(problems), specs=specs)
+
+
+def parse_step(scenario: str, title: str, step: str, text: str, defaults: dict, cfg: Config, path: str = "") -> Routine:
+    """steps/<step>.md -> a Routine without a schedule, named <scenario>/<step>; [defaults] under its header."""
+    raw, prompt = read_header(text, STEP_KEYS)
+    return build_routine(f"{scenario}/{step}", {**defaults, **raw}, prompt, cfg, path, title=f"{title} · {step}")
+
+
+def fill_step(template: str, values: dict) -> str:
+    """A step's prompt: {name} and dotted {vars.x}, {settings.x}, {state.x}, {item.x}; a dict or list goes in
+    as JSON. Anything it does not know stays as written."""
+    def replace(match: re.Match) -> str:
+        value = values
+        for part in match.group(1).split("."):
+            if not isinstance(value, dict) or part not in value:
+                return match.group(0)
+            value = value[part]
+        if value is None:
+            return ""
+        return json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else str(value)
+    return re.sub(r"\{(\w+(?:\.\w+)*)\}", replace, template)
 
 
 def _duration(raw: dict, key: str, default: str) -> int:
@@ -172,13 +208,13 @@ def check_settings(settings: dict, schema: dict) -> None:
             raise ValueError(f"[settings] {key} must be one of {', '.join(map(str, spec['choices']))}")
 
 
-def load_scenarios(folder: Path) -> tuple[dict[str, Scenario], dict[str, BrokenScenario]]:
+def load_scenarios(folder: Path, cfg: Config | None = None) -> tuple[dict[str, Scenario], dict[str, BrokenScenario]]:
     good, broken = {}, {}
     if not folder.is_dir():
         return good, broken
     for path in sorted(p for p in folder.iterdir() if p.is_dir() and not p.name.startswith(".")):
         try:
-            good[path.name] = parse_scenario(path)
+            good[path.name] = parse_scenario(path, cfg)
         except (ValueError, OSError) as exc:
             broken[path.name] = BrokenScenario(path.name, str(path), str(exc))
     return good, broken

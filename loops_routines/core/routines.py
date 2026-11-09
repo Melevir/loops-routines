@@ -50,6 +50,8 @@ PLACEHOLDERS = ("name", "title", "run_id", "now", "last_run_at", "previous_statu
 LIST_KEYS = ("repos", "mcp_servers", "plugins", "skills", "allowed_tools", "disallowed_tools")
 KNOWN_KEYS = {"title", "schedule", "grace", "window", "profile", "priority", "model", "effort", "max_turns",
               "max_runtime", "notify", "enabled", *LIST_KEYS, *LIMIT_BOUNDS}
+SCHEDULE_KEYS = {"schedule", "grace", "window"}
+STEP_KEYS = KNOWN_KEYS - SCHEDULE_KEYS  # a scenario's step: a routine the scenario starts, not a schedule
 
 
 @dataclass(frozen=True)
@@ -57,7 +59,7 @@ class Routine:
     name: str
     title: str
     schedule: str
-    trigger: Trigger
+    trigger: Trigger | None  # None for a scenario's step
     prompt: str
     limits: Limits = Limits()
     profile: str = "any"
@@ -111,24 +113,37 @@ def parse_routine(name: str, text: str, cfg: Config, path: str = "") -> Routine:
     """One routine file -> Routine. ValueError for anything that makes it unusable."""
     if not NAME_RE.match(name):
         raise ValueError(f"file name {name!r}: use lowercase letters, digits, - and _ (e.g. monitor-logs.md)")
+    raw, prompt = read_header(text, KNOWN_KEYS)
+    if "schedule" not in raw:
+        raise ValueError("schedule is missing: a cron line ('0 9 * * mon'), @daily, or 'every 30m'")
+    return build_routine(name, raw, prompt, cfg, path)
+
+
+def read_header(text: str, known: set[str]) -> tuple[dict, str]:
+    """A routine-style file -> (its TOML header, its prompt)."""
     header, body = split_front_matter(text)
     try:
         raw = tomllib.loads(header)
     except tomllib.TOMLDecodeError as exc:
         raise ValueError(f"header: {exc}") from None
-    unknown = set(raw) - KNOWN_KEYS
+    unknown = set(raw) - known
     if unknown:
-        raise ValueError(f"unknown keys: {', '.join(sorted(unknown))} (known: {', '.join(sorted(KNOWN_KEYS))})")
+        raise ValueError(f"unknown keys: {', '.join(sorted(unknown))} (known: {', '.join(sorted(known))})")
     prompt = body.strip()
     if not prompt:
         raise ValueError("the prompt (the text after the header) is empty")
-    if "schedule" not in raw:
-        raise ValueError("schedule is missing: a cron line ('0 9 * * mon'), @daily, or 'every 30m'")
-    tz = cfg.daemon.timezone
-    trigger = parse_trigger(str(raw["schedule"]), tz)
+    return raw, prompt
 
-    title = " ".join(str(raw.get("title", name)).split())
-    if not TITLE_RE.match(title):
+
+def build_routine(name: str, raw: dict, prompt: str, cfg: Config, path: str = "", *, title: str = "") -> Routine:
+    """A checked header and prompt -> Routine. Without `schedule` it is a scenario's step: no trigger, and
+    `title` is its default title (not held to TITLE_RE, it comes from the scenario)."""
+    trigger = parse_trigger(str(raw["schedule"]), cfg.daemon.timezone) if "schedule" in raw else None
+    title = " ".join(str(raw.get("title", title or name)).split())
+    if trigger is None:
+        if not title or len(title) > 80:
+            raise ValueError("title must be 1..80 characters")
+    elif not TITLE_RE.match(title):
         raise ValueError(f"title {title!r}: letters, digits, spaces and - _ # · . : only, up to 48 characters")
     window = str(raw.get("window", "*"))
     parse_window(window)
@@ -163,7 +178,7 @@ def parse_routine(name: str, text: str, cfg: Config, path: str = "") -> Routine:
         if not REPO_RE.match(repo):
             raise ValueError(f"repos: {repo!r} is not owner/name")
     return Routine(
-        name=name, title=title, schedule=str(raw["schedule"]).strip(), trigger=trigger, prompt=prompt,
+        name=name, title=title, schedule=str(raw.get("schedule", "")).strip(), trigger=trigger, prompt=prompt,
         limits=limits, profile=profile, grace=grace, window=window,
         priority=integer("priority", DEFAULT_PRIORITY, 0, 100), model=str(raw.get("model", "")), effort=effort,
         max_turns=integer("max_turns", DEFAULT_MAX_TURNS, 1, 500), max_runtime=max_runtime,
@@ -210,4 +225,5 @@ def fill(template: str, **values) -> str:
     return re.sub(r"\{(\w+)\}", replace, template)
 
 
-__all__ = ["Routine", "Broken", "parse_routine", "load_routines", "fingerprint", "fill", "BUILTIN_PROFILES"]
+__all__ = ["Routine", "Broken", "parse_routine", "read_header", "build_routine", "load_routines", "fingerprint",
+           "fill", "BUILTIN_PROFILES", "STEP_KEYS"]

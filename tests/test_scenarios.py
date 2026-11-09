@@ -232,13 +232,11 @@ def test_track_press_and_pause(make):
 
 
 def test_actions_of_later_phases_are_shown_not_run(make):
-    make_scenario(steps=("review",), decisions=[{"key": "r#1", "action": "run", "step": "review",
-                                                 "reason": "first review"}])
+    make_scenario(decisions=[{"key": "r#1", "action": "apply", "reason": "approved"}])
     service, _, _ = make()
     asyncio.run(service.scenarios.select_now("toy"))
     item = service.scenarios.item_detail("toy", "r#1")
-    assert item["action"] == "run" and item["step"] == "review"
-    assert "not carried out" in item["reason"] and not service.active
+    assert item["action"] == "apply" and "not carried out" in item["reason"] and not service.active
 
 
 def test_a_failing_select_is_an_error_on_the_scenario(make):

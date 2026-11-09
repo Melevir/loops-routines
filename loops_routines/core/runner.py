@@ -80,6 +80,7 @@ class RunSpec:
     agent_url: str  # the daemon's /agent/mcp
     agent_token: str  # this run's own bearer token for it
     listed: dict | None = None  # the last `claude mcp list` of the account (connector URLs)
+    step: bool = False  # a scenario's step: its result may carry `data` for the scenario
 
     @property
     def workdir(self) -> Path:
@@ -100,6 +101,13 @@ class RunResult(NamedTuple):
     summary: str = ""
     report: str = ""
     unavailable: tuple[str, ...] = ()  # integrations the routine asked for that did not work
+    data: dict | None = None  # a step's `data` for its scenario
+
+
+STEP_CONTRACT = """
+This run is one step of a scenario. Your result may also carry "data": a JSON object with whatever the
+step's instructions ask you to hand back (it reaches the scenario, not the user); keep it under 200 KB."""
+MAX_DATA = 200_000
 
 
 def describe_event(event: dict) -> str | None:
@@ -171,7 +179,7 @@ class RunTracker:
 
 
 def read_result(path: Path) -> tuple[dict | None, str | None]:
-    """The agent's result file -> ({status, summary, report}, problem)."""
+    """The agent's result file -> ({status, summary, report, data}, problem)."""
     if not path.is_file():
         return None, f"the agent wrote no {path.name}"
     try:
@@ -186,7 +194,10 @@ def read_result(path: Path) -> tuple[dict | None, str | None]:
     summary = " ".join(str(raw.get("summary") or "").split())
     if len(summary) > MAX_SUMMARY:
         summary = summary[:MAX_SUMMARY - 1].rstrip() + "…"
-    return {"status": status, "summary": summary, "report": str(raw.get("report") or "").strip()}, None
+    data = raw.get("data")
+    if data is not None and (not isinstance(data, dict) or len(json.dumps(data).encode()) > MAX_DATA):
+        return None, f"{path.name}: data must be a JSON object under {MAX_DATA // 1000} KB"
+    return {"status": status, "summary": summary, "report": str(raw.get("report") or "").strip(), "data": data}, None
 
 
 async def gh_clone(repo: str, dest: Path, env: dict) -> None:
@@ -375,6 +386,8 @@ class Run:
         notify_text = notify.instructions(spec.routine.notify)
         prompt += CONTRACT.format(title=spec.routine.title, run_id=spec.run_id, result_path=spec.result_path,
                                   server=AGENT_SERVER, notify_text=notify_text)
+        if spec.step:
+            prompt += STEP_CONTRACT
         return argv, prompt, setup, cwd
 
     async def execute(self) -> RunResult:
@@ -475,8 +488,9 @@ class Run:
             if self._wrap_reason and outcome == "stopped":
                 error = f"wound down: {self._wrap_reason}"
             result, problem = read_result(spec.result_path)
+            data = None
             if result:
-                status, summary, report = result["status"], result["summary"], result["report"]
+                status, summary, report, data = result["status"], result["summary"], result["report"], result["data"]
             else:
                 status, report = "unknown", tracker.last_text
                 summary = " ".join(tracker.last_text.split())[:MAX_SUMMARY] or (problem or "")
@@ -486,4 +500,4 @@ class Run:
             log.write(f"--- {utc_now()} exit {code} ({outcome})\n")
         self._event(f"finished: {outcome}")
         return RunResult(code, outcome, error, tuple(tracker.denied), tracker.usage, status, summary, report,
-                         tuple(tracker.unavailable))
+                         tuple(tracker.unavailable), data)

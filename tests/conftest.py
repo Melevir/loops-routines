@@ -72,6 +72,8 @@ if mode == "message":
 elif mode != "noresult":
     status = "alert" if mode == "alert" else "ok"
     result = {{"status": status, "summary": "all " + status, "report": "# Report\n" + prompt[:80]}}
+    if "one step of a scenario" in prompt:  # a step hands data back: here, the start of its prompt
+        result["data"] = {{"prompt": prompt[:300]}}
     open(result_path, "w").write(json.dumps(result))
 print(json.dumps({{"type": "assistant", "message": {{"content": [{{"type": "text", "text": "Done here."}}]}}}}), flush=True)
 print(json.dumps({{"type": "result", "subtype": "success", "is_error": False, "num_turns": 2, "result": "Done here.",

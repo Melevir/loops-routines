@@ -19,6 +19,8 @@
     GET  /api/scenarios/{name}/items?done=1        POST /api/scenarios/{name}/items {key, title, url}  (track)
     GET  /api/scenarios/{name}/item?key=           POST /api/scenarios/{name}/item/untrack {key}
     POST /api/scenarios/{name}/item/press {key, button}   POST /api/scenarios/{name}/item/pause {key, paused}
+    POST /api/scenarios/{name}/item/run {key, step, force}  (a step for the item, now)
+    POST /api/scenarios/{name}/steps/{step}/enabled {enabled}
     GET  /api/events                      Server-Sent Events: run.*, routine.*, routines.*, question.*, usage.updated,
                                           scenario.*, scenarios.*, item.updated
     /mcp, /agent/mcp                      see daemon.mcp
@@ -239,7 +241,16 @@ def build_app(service: Service, *, token: str | None = None, run_scheduler: bool
             return s.scenarios.press(name, key, str(body.get("button") or ""))
         if action == "pause":
             return s.scenarios.pause(name, key, bool(body.get("paused", True)))
-        raise KeyError(f"no item action {action!r}: untrack, press or pause")
+        if action == "run":
+            return s.scenarios.run_step_now(name, key, str(body.get("step") or ""), bool(body.get("force")))
+        raise KeyError(f"no item action {action!r}: untrack, press, pause or run")
+
+    @endpoint
+    async def step_enabled(request):
+        body = await _body(request)
+        if "enabled" not in body or body["enabled"] not in (True, False, None):
+            raise ValueError("send {\"enabled\": true | false | null}")
+        return s.scenarios.set_step_enabled(request.path_params["name"], request.path_params["step"], body["enabled"])
 
     async def events(request: Request) -> Response:
         queue = s.bus.subscribe()
@@ -310,6 +321,7 @@ def build_app(service: Service, *, token: str | None = None, run_scheduler: bool
         Route("/api/scenarios/{name}/items", scenario_items, methods=["GET", "POST"]),
         Route("/api/scenarios/{name}/item", scenario_item),
         Route("/api/scenarios/{name}/item/{action}", scenario_item_action, methods=["POST"]),
+        Route("/api/scenarios/{name}/steps/{step}/enabled", step_enabled, methods=["POST"]),
         Route("/api/events", events),
         *user_mcp_app.routes,
         *agent_mcp_app.routes,

@@ -103,11 +103,23 @@ SCHEMA = [
     );
     CREATE INDEX item_events_item ON item_events (scenario, key, id);
     """,
+    """
+    ALTER TABLE runs ADD COLUMN scenario TEXT;     -- a scenario's step run: which scenario, item and step
+    ALTER TABLE runs ADD COLUMN item_key TEXT;
+    ALTER TABLE runs ADD COLUMN step TEXT;
+    ALTER TABLE runs ADD COLUMN version TEXT;      -- what the run was about (select's version)
+    ALTER TABLE runs ADD COLUMN data TEXT;         -- the step's result data for the scenario
+    CREATE INDEX runs_item ON runs (scenario, item_key, step, id);
+    ALTER TABLE items ADD COLUMN vars TEXT NOT NULL DEFAULT '{}';  -- the last run decision's vars
+    ALTER TABLE items ADD COLUMN queue TEXT;       -- why its step isn't running yet, or which run it is
+    ALTER TABLE scenario_state ADD COLUMN step_switches TEXT NOT NULL DEFAULT '{}';  -- step -> on/off from the UI
+    """,
 ]
 
-ITEM_JSON = ("state", "buttons", "notified")
+ITEM_JSON = ("state", "buttons", "notified", "vars")
 ITEM_FIELDS = {"title", "url", "state", "action", "step", "reason", "version", "notice", "buttons", "notified",
-               "tracked", "paused", "done_at"}
+               "tracked", "paused", "done_at", "vars", "queue"}
+FAILED_RUN = "(outcome != 'ok' OR status = 'unknown')"  # a step run that did not end with a usable result
 
 
 class Store:
@@ -172,10 +184,14 @@ class Store:
 
     # --- runs ----------------------------------------------------------------------
 
-    def start_run(self, routine: str, trigger: str, occurrence_at: str | None, now: str, account: str = "") -> int:
+    def start_run(self, routine: str, trigger: str, occurrence_at: str | None, now: str, account: str = "",
+                  item: tuple[str, str, str, str | None] | None = None) -> int:
+        """item: (scenario, key, step, version) for a scenario's step."""
+        scenario, key, step, version = item or (None, None, None, None)
         cur = self._exec(
-            "INSERT INTO runs (routine, trigger, occurrence_at, state, started_at, account) "
-            "VALUES (?, ?, ?, 'running', ?, ?)", routine, trigger, occurrence_at, now, account)
+            "INSERT INTO runs (routine, trigger, occurrence_at, state, started_at, account, scenario, item_key, step, "
+            "version) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)", routine, trigger, occurrence_at, now, account,
+            scenario, key, step, version)
         return cur.lastrowid
 
     def set_run_paths(self, run_id: int, log_path: str, run_dir: str) -> None:
@@ -185,12 +201,13 @@ class Store:
         self._exec("UPDATE runs SET pid = ? WHERE id = ?", pid, run_id)
 
     def finish_run(self, run_id: int, now: str, *, outcome: str, status: str, summary: str = "", report: str = "",
-                   error: str | None = None, denied=(), unavailable=(), usage: dict | None = None) -> None:
+                   error: str | None = None, denied=(), unavailable=(), usage: dict | None = None,
+                   data: dict | None = None) -> None:
         self._exec(
             "UPDATE runs SET state = 'finished', finished_at = ?, outcome = ?, status = ?, summary = ?, report = ?, "
-            "error = ?, denied = ?, unavailable = ?, usage = ?, pid = NULL WHERE id = ?",
+            "error = ?, denied = ?, unavailable = ?, usage = ?, data = ?, pid = NULL WHERE id = ?",
             now, outcome, status, summary, report, error, json.dumps(list(denied)), json.dumps(list(unavailable)),
-            json.dumps(usage) if usage is not None else None, run_id)
+            json.dumps(usage) if usage is not None else None, json.dumps(data) if data is not None else None, run_id)
 
     def add_skip(self, routine: str, occurrence_at: str, reason: str, now: str) -> int:
         cur = self._exec(
@@ -256,11 +273,39 @@ class Store:
         row = self._one("SELECT * FROM scenario_state WHERE name = ?", name) or {}
         if row:
             row["last_problems"] = json.loads(row["last_problems"] or "[]")
+            row["step_switches"] = json.loads(row["step_switches"] or "{}")
         return row
 
     def set_scenario_enabled(self, name: str, enabled: bool | None) -> None:
         self._exec("UPDATE scenario_state SET enabled = ? WHERE name = ?",
                    None if enabled is None else int(bool(enabled)), name)
+
+    def set_step_enabled(self, name: str, step: str, enabled: bool | None) -> None:
+        with self._lock:
+            switches = self.scenario_state(name).get("step_switches") or {}
+            if enabled is None:
+                switches.pop(step, None)
+            else:
+                switches[step] = bool(enabled)
+            self._exec("UPDATE scenario_state SET step_switches = ? WHERE name = ?", json.dumps(switches), name)
+
+    def step_attempts(self, scenario: str, key: str, step: str, version: str | None) -> tuple[int, int]:
+        """Finished runs of a step on an item's version: (ended with a result, failed)."""
+        row = self._one(f"SELECT COUNT(*) AS n, SUM(CASE WHEN {FAILED_RUN} THEN 1 ELSE 0 END) AS failed FROM runs "
+                        "WHERE scenario = ? AND item_key = ? AND step = ? AND version IS ? AND state = 'finished'",
+                        scenario, key, step, version)
+        failed = (row or {}).get("failed") or 0
+        return ((row or {}).get("n") or 0) - failed, failed
+
+    def item_runs(self, scenario: str, key: str, limit: int = 20) -> list[dict]:
+        return [_run(r) for r in self._all("SELECT * FROM runs WHERE scenario = ? AND item_key = ? ORDER BY id DESC "
+                                           "LIMIT ?", scenario, key, limit)]
+
+    def last_step_runs(self, scenario: str, key: str) -> dict[str, dict]:
+        """The latest finished run of each step on an item."""
+        rows = self._all("SELECT * FROM runs WHERE id IN (SELECT MAX(id) FROM runs WHERE scenario = ? AND item_key = ? "
+                         "AND state = 'finished' GROUP BY step)", scenario, key)
+        return {r["step"]: _run(r) for r in rows}
 
     def record_select(self, name: str, at: str, *, error: str | None, problems=(), duration_ms: int) -> None:
         self._exec("UPDATE scenario_state SET last_select_at = ?, last_error = ?, last_problems = ?, "
@@ -351,6 +396,7 @@ def _run(row: dict) -> dict:
     for key in ("denied", "unavailable"):
         row[key] = json.loads(row[key] or "[]")
     row["usage"] = json.loads(row["usage"]) if row.get("usage") else None
+    row["data"] = json.loads(row["data"]) if row.get("data") else None
     row["seen"] = bool(row["seen"])
     return row
 

@@ -30,9 +30,10 @@ idle with its next run); get_run gives a run's result and report. run_routine st
 rules (free slot, its usage limits); run_routine_now starts it at once, outside the queue.
 
 Scenarios are multi-step workflows over many items (e.g. babysitting pull requests), folders in
-~/.loops_routines/scenarios/: a `select` program decides each item's next step without an LLM.
+~/.loops_routines/scenarios/: a `select` program decides each item's next step without an LLM, and the
+daemon runs that step's agent (steps/<step>.md) within the same slots and limits as the routines.
 list_scenarios and scenario_status show them and their items; track_item / untrack_item choose the items;
-press_item_button and pause_item act on one.
+press_item_button and pause_item act on one; set_step_enabled switches a step, run_step_now starts one.
 """
 
 AGENT_INSTRUCTIONS = """\
@@ -240,6 +241,31 @@ def user_server(service: Service) -> MCPServer:
     async def pause_item(name: str, key: str, paused: bool = True) -> dict:
         """Pause an item (its select keeps deciding, nothing is done for it) or resume it."""
         return await _call(service.scenarios.pause, name, key, paused)
+
+    @server.tool()
+    async def set_step_enabled(name: str, step: str, enabled: bool | None) -> dict:
+        """Switch one step of a scenario on or off (e.g. stop it merging, keep it reviewing); null goes back
+        to the step file. A switched-off step is not started; one already running finishes.
+
+        Args:
+            name: The scenario's folder name.
+            step: The step's name (steps/<step>.md), as scenario_status lists it.
+            enabled: true, false, or null.
+        """
+        return await _call(service.scenarios.set_step_enabled, name, step, enabled)
+
+    @server.tool()
+    async def run_step_now(name: str, key: str, step: str, force: bool = False) -> dict:
+        """Start a step's agent for one item now, outside the scenario's queue, its attempts and switches;
+        only when the user asked. A free slot is still needed, and the step's usage limits unless force.
+
+        Args:
+            name: The scenario's folder name.
+            key: The item's key.
+            step: The step to run.
+            force: Start even when the step's usage limits say no.
+        """
+        return await _call(service.scenarios.run_step_now, name, key, step, force)
 
     return server
 

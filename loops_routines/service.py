@@ -49,6 +49,7 @@ class Active:
     task: asyncio.Task | None = None
     account: str = ""
     notified_error: bool = False  # the agent sent an error notification itself
+    item: tuple[str, str, str, str | None] | None = None  # a scenario's step: (scenario, key, step, version)
 
 
 @dataclass
@@ -315,11 +316,25 @@ class Service:
                 candidates.append((routine, verdict))
             wants_probe = wants_probe or verdict.needs_probe
             verdicts[routine.name] = verdict
-        candidates.sort(key=lambda c: (-c[0].priority, c[1].occurrence))
-        for routine, verdict in candidates:
+        try:  # scenarios' steps waiting to run share the slots, by priority
+            steps, steps_probe = self.scenarios.candidates(now, problem)
+        except Exception:  # a scenario's trouble never stops the routines
+            traceback.print_exc()
+            steps, steps_probe = [], False
+        wants_probe = wants_probe or steps_probe
+        queue = [(-r.priority, v.occurrence, n, (r, v)) for n, (r, v) in enumerate(candidates)]
+        queue += [(-c.priority, c.at, len(queue) + n, c) for n, c in enumerate(steps)]
+        busy = f"all {self.cfg.daemon.max_parallel} slots are busy"
+        for _, _, _, candidate in sorted(queue, key=lambda q: q[:3]):
+            if not isinstance(candidate, tuple):
+                if len(self.active) >= self.cfg.daemon.max_parallel:
+                    self.scenarios.hold(candidate, busy)
+                else:
+                    self.scenarios.launch(candidate)
+                continue
+            routine, verdict = candidate
             if len(self.active) >= self.cfg.daemon.max_parallel:
-                verdicts[routine.name] = Verdict("wait", f"all {self.cfg.daemon.max_parallel} slots are busy",
-                                                 verdict.occurrence, verdict.deadline)
+                verdicts[routine.name] = Verdict("wait", busy, verdict.occurrence, verdict.deadline)
                 continue
             self.store.set_fired(routine.name, clock.to_iso(verdict.occurrence))
             run_id = self._launch(routine, "schedule", verdict.occurrence)
@@ -360,19 +375,22 @@ class Service:
                 "previous_summary": (last or {}).get("summary") or "none",
                 "previous_report": report or "none", "repos": ", ".join(routine.repos) or "none"}
 
-    def _launch(self, routine: Routine, trigger: str, occurrence) -> int:
+    def _launch(self, routine: Routine, trigger: str, occurrence, *, prompt=None,
+                item: tuple[str, str, str, str | None] | None = None) -> int:
+        """Start a run. A scenario's step passes its item and prompt(run_id) -> its filled prompt."""
         now = clock.to_iso(self._now())
         run_id = self.store.start_run(routine.name, trigger, clock.to_iso(occurrence) if occurrence else None, now,
-                                      self.account)
+                                      self.account, item=item)
         run_dir = paths.runs_dir() / str(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         run_dir = run_dir.resolve()  # /var -> /private/var: permission rules match real paths
         log_path = paths.log_dir() / f"run-{run_id}.log"
         self.store.set_run_paths(run_id, str(log_path), str(run_dir))
         token = secrets.token_urlsafe(24)
-        spec = RunSpec(run_id=run_id, routine=routine, agent=self.cfg.agent,
-                       prompt=fill(routine.prompt, **self._placeholders(routine, run_id)), run_dir=run_dir,
-                       log_path=log_path, agent_url=self.agent_url, agent_token=token, listed=self.listed())
+        text = prompt(run_id) if prompt else fill(routine.prompt, **self._placeholders(routine, run_id))
+        spec = RunSpec(run_id=run_id, routine=routine, agent=self.cfg.agent, prompt=text, run_dir=run_dir,
+                       log_path=log_path, agent_url=self.agent_url, agent_token=token, listed=self.listed(),
+                       step=item is not None)
         account = self.account
 
         def on_event(summary: str) -> None:
@@ -385,11 +403,12 @@ class Service:
             self.save_snapshot(snapshot, account)
 
         run = self._run_factory(spec, on_event, on_usage)
-        active = Active(run, routine, token, account=account)
+        active = Active(run, routine, token, account=account, item=item)
         self.active[run_id] = active
         self._tokens[token] = run_id
         active.task = self._spawn(self._execute(run_id, active))
-        self.bus.publish("run.started", {"run_id": run_id, "routine": routine.name, "trigger": trigger})
+        self.bus.publish("run.started", {"run_id": run_id, "routine": routine.name, "trigger": trigger,
+                                         **({"scenario": item[0], "key": item[1], "step": item[2]} if item else {})})
         return run_id
 
     async def _execute(self, run_id: int, active: Active) -> None:
@@ -410,8 +429,13 @@ class Service:
         now = clock.utc_now()
         self.store.finish_run(run_id, now, outcome=result.outcome, status=result.status, summary=result.summary,
                               report=result.report, error=result.error, denied=result.denied,
-                              unavailable=result.unavailable, usage=result.usage)
+                              unavailable=result.unavailable, usage=result.usage, data=result.data)
         run = self.store.run(run_id)
+        if active.item:
+            try:
+                await self.scenarios.run_finished(active.item, run)
+            except Exception:  # the run is recorded either way
+                traceback.print_exc()
         try:
             deliver.write_report(run, routine.title)
         except OSError:
@@ -492,10 +516,12 @@ class Service:
         return {**self._run_view(row, full=True), "messages": self.store.messages(run_id)}
 
     def _run_view(self, row: dict, full: bool) -> dict:
-        routine = self.routines.get(row["routine"])
+        routine = self.routines.get(row["routine"]) or self.scenarios.spec_for(row)
         view = {k: row[k] for k in ("id", "routine", "trigger", "occurrence_at", "state", "outcome", "status",
                                     "summary", "error", "started_at", "finished_at", "seen")}
         view["title"] = routine.title if routine else row["routine"]
+        if row.get("scenario"):
+            view.update({k: row.get(k) for k in ("scenario", "item_key", "step", "version")})
         view["cost_usd"] = (row.get("usage") or {}).get("cost_usd")
         active = self.active.get(row["id"])
         if active:
@@ -503,7 +529,7 @@ class Service:
                             "accepts_messages": active.run.accepts_messages}
         if full:
             view.update({k: row[k] for k in ("report", "denied", "unavailable", "usage", "log_path", "run_dir",
-                                             "account")})
+                                             "account", "data")})
         return view
 
     def log_tail(self, run_id: int, lines: int = 200) -> str:

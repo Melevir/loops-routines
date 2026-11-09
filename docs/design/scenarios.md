@@ -1,8 +1,9 @@
 # Scenarios: multi-step agent workflows over many items
 
-Status: phase 1 (the core) is built: folders, `select`, the actions `wait`, `notify` and `done`, item
-state and events, track / untrack / press / pause, CLI, MCP and REST. `run`, `apply` and `ask` decisions
-are recorded and shown, not carried out yet (phases 2–3).
+Status: phases 1 (the core) and 2 (steps) are built: folders, `select`, the actions `run`, `wait`,
+`notify` and `done`, item state and events, agent steps sharing the daemon's slots and limits, attempts
+and "stuck", step switches, track / untrack / press / pause / run a step now, CLI, MCP and REST. `apply`
+and `ask` decisions are recorded and shown, not carried out yet (phase 3).
 
 ## Why
 
@@ -71,19 +72,26 @@ folder; stderr goes to `~/Library/Logs/loops_routines/scenario-<name>.log`):
   "now": "2026-11-09T10:00:00+00:00",
   "settings": {"login": "melevir", "max_rounds": 3},
   "steps": ["develop", "fix_ci", "review"],
+  "steps_on": ["develop", "review"],
   "items": {
     "Melevir/x#12": {"title": "Fix the login race", "url": "https://...", "tracked": true, "paused": false,
                      "state": {"reviewed_sha": "ab12", "review_rounds": 1},
                      "buttons": ["sent_for_review"],
-                     "last": {"action": "notify", "step": null, "reason": "your turn", "version": "ab12"},
-                     "events": [{"id": 7, "kind": "button", "name": "sent_for_review", "data": null, "at": "..."}]}
+                     "last": {"action": "ran", "step": "review", "reason": "review: 2 findings", "version": "ab12"},
+                     "running": null,
+                     "runs": {"review": {"run_id": 41, "version": "ab12", "outcome": "ok", "status": "ok",
+                                         "summary": "2 findings", "data": {"findings": []}, "...": "..."}},
+                     "events": [{"id": 7, "kind": "button", "name": "sent_for_review", "data": null, "at": "..."},
+                                {"id": 8, "kind": "run", "name": "finished", "data": {"run_id": 41, "step": "review",
+                                 "outcome": "ok", "status": "ok", "summary": "2 findings", "data": {}}, "at": "..."}]}
   },
   "tracked": ["Melevir/x#12"]
 }
 ```
 
 `items` holds every followed item that is not done. `events` are the ones since the last select
-(`button`, `track`); each is handed to one select only.
+(`button`, `track`, `run` finished); each is handed to one select only. `running` is the step running
+for the item now; `runs` the latest finished run of each step, with its `data`.
 
 `tracked`: items a person added by hand (MCP `track`, CLI, UI). The selector may also discover items
 itself (`gh pr list --label babysit`).
@@ -119,12 +127,37 @@ scenario's rules are tested with plain unit tests, without the daemon or an LLM.
 
 `steps/<step>.md` is a routine without a schedule: the same header keys (model, effort, max_turns,
 max_runtime, profile and limits, priority, repos, mcp_servers, plugins, skills, allowed_tools,
-disallowed_tools, notify, enabled), defaults from `[defaults]`, and a prompt with `{vars.*}`,
-`{settings.*}`, `{state.*}` and the usual placeholders. Each step is switched on and off on its own;
-a switched-off step makes the selector's `run` a `wait` ("review is off").
+disallowed_tools, notify, enabled; not schedule, grace or window), defaults from `[defaults]`, and a
+prompt with placeholders: `{key}`, `{url}`, `{version}`, `{reason}`, `{step}`, `{scenario}`,
+`{item.title}`, `{vars.*}` (the `run` decision's vars), `{settings.*}`, `{state.*}`, `{run_id}`, `{now}`,
+`{repos}`, and `{previous_status}`, `{previous_summary}`, `{previous_report}` of the same step on the
+same item. A dict or list goes in as JSON; anything unknown stays as written. A broken step file makes
+the scenario broken (`scenario check` says which).
 
-The agent ends with the usual result file, plus `data`: whatever its apply needs (review findings,
-thread replies).
+The agent ends with the usual result file, plus `data`: a JSON object (up to 200 KB) with whatever the
+scenario needs back (review findings, thread replies). It comes back to `select` in the `run` event and
+in `runs`, and later to `apply`.
+
+How a `run` decision becomes a run:
+
+- It queues the step for the item (`queue` says why it hasn't started: "queued", "step review is off",
+  "all 2 slots are busy", "5-hour window 12% free, keeping 15%", "max_items", ...). The daemon's tick
+  starts queued steps with the routines, by `priority`, then oldest first, within `max_parallel`, the
+  step's profile limits and the scenario's `max_items`. A paused item or a switched-off scenario or step
+  starts nothing; a running step is never interrupted by a select, by a switch or by a pause (untrack
+  stops it).
+- Once started, the decision is used up: when the run ends the item's last action is `ran` (reason: the
+  step and its summary) and a select runs at once to say what comes next.
+- **Once per version.** A step that ended well (a result file) on an item's `version` doesn't run again
+  for that version: "review already ran for version ab12". To run it again, give a new version.
+- **Attempts.** A step that failed (no result, an error, a timeout, a stop) `max_attempts` times on the
+  same version is not started again: the item is `stuck` and you get one notification per step and
+  version. A new version starts afresh.
+- `scenario run NAME KEY STEP` (MCP `run_step_now`) starts a step by hand: outside the queue, the
+  attempts, the switches and `max_items`, within the slots and (unless `--force`) the step's limits.
+
+Step runs are ordinary runs: `runs`, `get`, `log`, `stop` and `say` work on them, their reports go to
+`reports/<scenario>/<step>/`, and agents in them have the usual tools (report_status, notify, ...).
 
 ### `apply`: the writes stay out of the agent's hands
 
@@ -148,9 +181,9 @@ header denies them), so whatever its prompt or the PR text says, it can't merge 
 
 | | |
 |---|---|
-| CLI | `scenarios`, `scenario show NAME`, `scenario enable/disable NAME [STEP]`, `items NAME`, `track NAME KEY`, `untrack`, `press NAME KEY BUTTON`, `step-now NAME KEY STEP`, `scenario check DIR`, `scenario add GIT-URL` |
-| MCP | `list_scenarios`, `scenario_status`, `set_scenario_enabled` (scenario or step), `list_items`, `track_item`, `untrack_item`, `press_button`, `run_step_now`, plus the run tools as they are |
-| REST | `/api/scenarios…`, `/api/scenarios/{name}/items…`; events on `/api/events` |
+| CLI | `scenarios`, `scenario show NAME`, `scenario enable/disable/reset NAME`, `scenario step NAME STEP on/off/reset`, `scenario item NAME KEY`, `scenario track/untrack NAME KEY`, `scenario press NAME KEY BUTTON`, `scenario pause/resume NAME KEY`, `scenario run NAME KEY STEP`, `scenario select NAME`, `scenario check DIR`; later `scenario add GIT-URL` |
+| MCP | `list_scenarios`, `scenario_status`, `set_scenario_enabled`, `set_step_enabled`, `run_scenario_select`, `scenario_item`, `track_item`, `untrack_item`, `press_item_button`, `pause_item`, `run_step_now`, plus the run tools as they are |
+| REST | `/api/scenarios…`, `/api/scenarios/{name}/item/{untrack,press,pause,run}`, `/api/scenarios/{name}/steps/{step}/enabled`; events on `/api/events` |
 
 ## Babysitting as the first module
 

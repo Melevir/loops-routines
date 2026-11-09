@@ -12,7 +12,13 @@ All notable changes to this project are documented here. The format follows
   `~/.loops_routines/scenarios/`. A `select` program decides each item's next step without an LLM;
   the daemon runs it on a schedule, keeps each item's state, sends notifications once, and takes
   button presses. `loops-routines scenarios` / `scenario …`, MCP tools and REST endpoints to see and
-  steer them. Agent steps come next. See [docs/design/scenarios.md](docs/design/scenarios.md).
+  steer them. See [docs/design/scenarios.md](docs/design/scenarios.md).
+- Scenario steps: `steps/<step>.md` (a routine header without a schedule, `[defaults]` underneath) run
+  as agents when `select` decides `run`, sharing the slots and usage limits with the routines by
+  priority, within the scenario's `max_items`. A step runs once per item version when it ends well,
+  hands `data` back to the scenario, and makes the item "stuck" (one notification) after `max_attempts`
+  failures. Steps switch on and off one by one (`scenario step`, `set_step_enabled`) and start by hand
+  (`scenario run`, `run_step_now`).
 
 ## [0.1.0] - 2026-11-08
 
