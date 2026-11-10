@@ -1,9 +1,9 @@
 # Scenarios: multi-step agent workflows over many items
 
-Status: phases 1 (the core) and 2 (steps) are built: folders, `select`, the actions `run`, `wait`,
-`notify` and `done`, item state and events, agent steps sharing the daemon's slots and limits, attempts
-and "stuck", step switches, track / untrack / press / pause / run a step now, CLI, MCP and REST. `apply`
-and `ask` decisions are recorded and shown, not carried out yet (phase 3).
+Status: phases 1 (the core), 2 (steps) and 3 (apply and people) are built: folders, `select`, every
+action (`run`, `apply`, `wait`, `notify`, `ask`, `done`), item state and events, agent steps sharing the
+daemon's slots and limits, attempts and "stuck", the apply hook, questions, step switches, track /
+untrack / press / answer / pause / run a step now, CLI, MCP and REST. Next: the babysit module (phase 4).
 
 ## Why
 
@@ -41,6 +41,8 @@ A scenario is one folder, so it can be a git repository: shared, versioned, inst
 ```toml
 title = "PR babysitter"
 select_every = "5m"          # how often `select` runs; also right after each step of an item ends
+select_timeout = "60s"       # select is stopped after this (1s..10m)
+apply_timeout = "2m"         # apply is stopped after this (1s..10m)
 enabled = false
 max_items = 3                # items with a step running at once (on top of the daemon's max_parallel)
 max_attempts = 2             # failed runs of one step on one item version before it goes to you
@@ -78,20 +80,27 @@ folder; stderr goes to `~/Library/Logs/loops_routines/scenario-<name>.log`):
                      "state": {"reviewed_sha": "ab12", "review_rounds": 1},
                      "buttons": ["sent_for_review"],
                      "last": {"action": "ran", "step": "review", "reason": "review: 2 findings", "version": "ab12"},
-                     "running": null,
+                     "running": null, "applying": false,
+                     "asking": null,
                      "runs": {"review": {"run_id": 41, "version": "ab12", "outcome": "ok", "status": "ok",
                                          "summary": "2 findings", "data": {"findings": []}, "...": "..."}},
                      "events": [{"id": 7, "kind": "button", "name": "sent_for_review", "data": null, "at": "..."},
                                 {"id": 8, "kind": "run", "name": "finished", "data": {"run_id": 41, "step": "review",
-                                 "outcome": "ok", "status": "ok", "summary": "2 findings", "data": {}}, "at": "..."}]}
+                                 "outcome": "ok", "status": "ok", "summary": "2 findings", "data": {}}, "at": "..."},
+                                {"id": 9, "kind": "apply", "name": "ok", "data": {"source": "step", "step": "review",
+                                 "version": "ab12", "run_id": 41, "error": null, "notify": "Review posted"}, "at": "..."},
+                                {"id": 10, "kind": "answer", "name": "Merge", "data": {"question": "merge",
+                                 "status": "answered", "via": "in the dialog", "text": "Merge it now?"}, "at": "..."}]}
   },
   "tracked": ["Melevir/x#12"]
 }
 ```
 
 `items` holds every followed item that is not done. `events` are the ones since the last select
-(`button`, `track`, `run` finished); each is handed to one select only. `running` is the step running
-for the item now; `runs` the latest finished run of each step, with its `data`.
+(`button`, `track`, `run` finished, `apply` ok/failed, `answer`); each is handed to one select only.
+`running` is the step running for the item now, `applying` whether its apply hook runs, `asking` its
+open question (`question_id`, `name`, `text`, `answers`, `deadline`); `runs` the latest finished run of
+each step, with its `data`.
 
 `tracked`: items a person added by hand (MCP `track`, CLI, UI). The selector may also discover items
 itself (`gh pr list --label babysit`).
@@ -106,19 +115,25 @@ Out: one decision per item it looks after.
   {"key": "Melevir/z#3", "action": "notify", "kind": "yours", "once_per": "ef56",
    "text": "Your review: comment what to change, or send it for review",
    "buttons": ["sent_for_review"]},
+  {"key": "Melevir/v#4", "action": "apply", "step": "merge", "version": "cd34", "vars": {"method": "squash"},
+   "reason": "approved and green"},
+  {"key": "Melevir/u#9", "action": "ask", "name": "merge", "once_per": "cd34", "text": "Merge u#9 now?",
+   "answers": ["Merge", "Wait"], "timeout_minutes": 240},
   {"key": "Melevir/w#1", "action": "done", "reason": "merged and released"}
 ]
 ```
 
-Actions: `run` (an agent step), `apply` (the apply hook alone, no agent: a merge), `wait`, `notify`
-(`kind` is the banner's level, `name` which notice it is; sent once per `name` and `once_per`, which
-defaults to the text), `ask` (a dialog; the answer comes back as an event), `done` (stop following it;
+Actions: `run` (an agent step), `apply` (the apply hook alone, no agent: a merge; `step` names what to
+apply), `wait`, `notify` (`kind` is the banner's level, `name` which notice it is; sent once per `name`
+and `once_per`, which defaults to the text), `ask` (a question, see People), `done` (stop following it;
 it stays done until a person tracks it again). Any decision may carry `state` (a patch the daemon
 stores; a key set to null is removed), `title`, `url` and `buttons` (what a person may press on the
 item; a press becomes an event and starts a select at once). A paused item still gets decisions, but
-nothing is done for it. Bad decisions are left out and shown as the scenario's problems; a select that
-fails, times out or prints something else than JSON is the scenario's error (one notification per new
-error).
+nothing is done for it. While a step or the apply hook runs for an item, its decisions only update
+state, title, url and buttons. Bad decisions are left out and shown as the scenario's problems; a select
+that fails, times out or prints something else than JSON is the scenario's error (one notification per
+new error). A press, an answer or a finished run or apply during a select starts another select right
+after it.
 
 The selector holds every rule. It's pure from the daemon's view (state in → decisions out), so a
 scenario's rules are tested with plain unit tests, without the daemon or an LLM.
@@ -161,10 +176,51 @@ Step runs are ordinary runs: `runs`, `get`, `log`, `stop` and `say` work on them
 
 ### `apply`: the writes stay out of the agent's hands
 
-Optional executable. After a step (or for an `apply` action) the daemon runs it with
-`{item, step, result, state, settings}` and reads back `{state, notify?, error?}`. This is where the
-review is posted, threads are resolved, the PR is merged. The step's agent gets no write tools (its
-header denies them), so whatever its prompt or the PR text says, it can't merge or post as you.
+Optional executable, run like `select` (JSON on stdin, JSON on stdout, the scenario's folder, its log,
+`apply_timeout`). This is where the review is posted, threads are resolved, the PR is merged. The
+step's agent gets no write tools (its header denies them), so whatever its prompt or the PR text says,
+it can't merge or post as you.
+
+It runs:
+
+- **after every step that ended well** (a result file; a failed run is not applied), with
+  `"source": "step"` and the run's `result`: `{run_id, outcome, status, summary, report, data}`. The
+  apply hook decides what a `blocked` or `failed` status means for the world.
+- **for an `apply` decision**, at once (no slot, no agent), with `"source": "decision"`, `"result": null`
+  and the decision's `step` (what to apply) and `vars`. Like a step, it is done once per (item, what,
+  version) when it ends well, and an item is `stuck` after `max_attempts` failures on one version.
+
+In:
+```json
+{"scenario": "babysit", "now": "...", "settings": {}, "source": "step", "step": "review", "version": "ab12",
+ "vars": {}, "item": {"key": "Melevir/x#12", "title": "...", "url": "...", "state": {}}, "result": {"...": "..."}}
+```
+
+Out (every key optional; printing nothing is fine):
+```json
+{"state": {"posted_review": "ab12"}, "notify": {"text": "Review posted: 2 findings", "kind": "success"},
+ "error": "could not resolve thread 3"}
+```
+
+`state` is merged into the item's state (even with an error: a half-done apply records what it did).
+`notify` is a banner (text alone means `info`). `error`, a non-zero exit, a timeout or output that isn't
+the contract make the apply failed: you get one warning per (what, version), and the next select sees
+an `apply` event `failed` with the error (or `ok`). The item is busy while the hook runs, so no step
+starts for it. A daemon that stops mid-apply runs it again for the next decision: apply hooks should be
+safe to repeat (check before posting, merge only an open PR).
+
+### People
+
+- **Buttons**: a decision's `buttons` are what a person may press on the item (`scenario press`, MCP
+  `press_item_button`, REST, later the web page). A press is a `button` event.
+- **Questions**: an `ask` decision opens a macOS dialog with `text` and 1-3 `answers` (default Yes / No),
+  titled with the scenario and the item, and keeps it open for `timeout_minutes` (default a day). The
+  dialog, `loops-routines answer QID ANSWER` (listed by `questions`), `scenario answer NAME KEY ANSWER`,
+  MCP `answer_item_question` or `answer_question`, and REST answer it, whichever is first. The answer is
+  an `answer` event (its name is the answer; on a time-out it has no name and `status` says why). A
+  question is asked once per (`name`, `once_per`): while select keeps asking it, it stays open; once
+  answered or timed out it isn't asked again until `once_per` changes; a different question replaces it;
+  a decision that no longer asks it, `done` or untrack closes it without an answer.
 
 ### What the daemon adds
 
@@ -181,9 +237,9 @@ header denies them), so whatever its prompt or the PR text says, it can't merge 
 
 | | |
 |---|---|
-| CLI | `scenarios`, `scenario show NAME`, `scenario enable/disable/reset NAME`, `scenario step NAME STEP on/off/reset`, `scenario item NAME KEY`, `scenario track/untrack NAME KEY`, `scenario press NAME KEY BUTTON`, `scenario pause/resume NAME KEY`, `scenario run NAME KEY STEP`, `scenario select NAME`, `scenario check DIR`; later `scenario add GIT-URL` |
-| MCP | `list_scenarios`, `scenario_status`, `set_scenario_enabled`, `set_step_enabled`, `run_scenario_select`, `scenario_item`, `track_item`, `untrack_item`, `press_item_button`, `pause_item`, `run_step_now`, plus the run tools as they are |
-| REST | `/api/scenarios…`, `/api/scenarios/{name}/item/{untrack,press,pause,run}`, `/api/scenarios/{name}/steps/{step}/enabled`; events on `/api/events` |
+| CLI | `scenarios`, `scenario show NAME`, `scenario enable/disable/reset NAME`, `scenario step NAME STEP on/off/reset`, `scenario item NAME KEY`, `scenario track/untrack NAME KEY`, `scenario press NAME KEY BUTTON`, `scenario answer NAME KEY ANSWER`, `scenario pause/resume NAME KEY`, `scenario run NAME KEY STEP`, `scenario select NAME`, `scenario check DIR`, `questions` / `answer`; later `scenario add GIT-URL` |
+| MCP | `list_scenarios`, `scenario_status`, `set_scenario_enabled`, `set_step_enabled`, `run_scenario_select`, `scenario_item`, `track_item`, `untrack_item`, `press_item_button`, `answer_item_question`, `pause_item`, `run_step_now`, plus the run and question tools as they are |
+| REST | `/api/scenarios…`, `/api/scenarios/{name}/item/{untrack,press,answer,pause,run}`, `/api/scenarios/{name}/steps/{step}/enabled`, `/api/questions`; events on `/api/events` |
 
 ## Babysitting as the first module
 

@@ -20,6 +20,7 @@
     GET  /api/scenarios/{name}/item?key=           POST /api/scenarios/{name}/item/untrack {key}
     POST /api/scenarios/{name}/item/press {key, button}   POST /api/scenarios/{name}/item/pause {key, paused}
     POST /api/scenarios/{name}/item/run {key, step, force}  (a step for the item, now)
+    POST /api/scenarios/{name}/item/answer {key, answer}    (the item's open question)
     POST /api/scenarios/{name}/steps/{step}/enabled {enabled}
     GET  /api/events                      Server-Sent Events: run.*, routine.*, routines.*, question.*, usage.updated,
                                           scenario.*, scenarios.*, item.updated
@@ -243,7 +244,9 @@ def build_app(service: Service, *, token: str | None = None, run_scheduler: bool
             return s.scenarios.pause(name, key, bool(body.get("paused", True)))
         if action == "run":
             return s.scenarios.run_step_now(name, key, str(body.get("step") or ""), bool(body.get("force")))
-        raise KeyError(f"no item action {action!r}: untrack, press, pause or run")
+        if action == "answer":
+            return s.scenarios.answer(name, key, str(body.get("answer") or ""))
+        raise KeyError(f"no item action {action!r}: untrack, press, pause, run or answer")
 
     @endpoint
     async def step_enabled(request):

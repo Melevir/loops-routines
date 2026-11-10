@@ -19,6 +19,13 @@ All notable changes to this project are documented here. The format follows
   hands `data` back to the scenario, and makes the item "stuck" (one notification) after `max_attempts`
   failures. Steps switch on and off one by one (`scenario step`, `set_step_enabled`) and start by hand
   (`scenario run`, `run_step_now`).
+- Scenario apply hooks and questions: an optional `apply` program gets each step's result (and runs
+  alone for an `apply` decision, once per item version, with attempts like steps) to write it to the
+  world, so step agents need no write tools; its state patch, notification and outcome come back to
+  `select`. An `ask` decision opens a question with 1-3 answers, once per `once_per`; the dialog,
+  `loops-routines answer` / `scenario answer`, MCP `answer_item_question` or REST answer it, and the
+  answer reaches `select` as an event. A press or an answer during a select now starts another one
+  right after it.
 
 ## [0.1.0] - 2026-11-08
 

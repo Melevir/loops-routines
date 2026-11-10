@@ -31,9 +31,10 @@ rules (free slot, its usage limits); run_routine_now starts it at once, outside 
 
 Scenarios are multi-step workflows over many items (e.g. babysitting pull requests), folders in
 ~/.loops_routines/scenarios/: a `select` program decides each item's next step without an LLM, and the
-daemon runs that step's agent (steps/<step>.md) within the same slots and limits as the routines.
-list_scenarios and scenario_status show them and their items; track_item / untrack_item choose the items;
-press_item_button and pause_item act on one; set_step_enabled switches a step, run_step_now starts one.
+daemon runs that step's agent (steps/<step>.md) within the same slots and limits as the routines; an
+`apply` program writes the results to the world. list_scenarios and scenario_status show them and their
+items; track_item / untrack_item choose the items; press_item_button, answer_item_question and pause_item
+act on one; set_step_enabled switches a step, run_step_now starts one.
 """
 
 AGENT_INSTRUCTIONS = """\
@@ -199,8 +200,8 @@ def user_server(service: Service) -> MCPServer:
 
     @server.tool()
     async def scenario_item(name: str, key: str) -> dict:
-        """One item of a scenario: its state, last decision, buttons and history (decisions, notices,
-        button presses).
+        """One item of a scenario: its state, last decision, buttons, open question and history (decisions,
+        runs, apply results, notices, button presses, answers).
 
         Args:
             name: The scenario's folder name.
@@ -236,6 +237,18 @@ def user_server(service: Service) -> MCPServer:
             button: One of the item's buttons as listed (any case).
         """
         return await _call(service.scenarios.press, name, key, button)
+
+    @server.tool()
+    async def answer_item_question(name: str, key: str, answer: str) -> dict:
+        """Answer the question a scenario asks about an item (scenario_item shows it under `question`), only
+        with the answer the user gave you: the dialog closes and the scenario's select sees the answer at once.
+
+        Args:
+            name: The scenario's folder name.
+            key: The item's key.
+            answer: One of the question's answers as listed (any case).
+        """
+        return await _call(service.scenarios.answer, name, key, answer)
 
     @server.tool()
     async def pause_item(name: str, key: str, paused: bool = True) -> dict:

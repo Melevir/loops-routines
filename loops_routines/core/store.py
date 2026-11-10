@@ -355,6 +355,14 @@ class Store:
         with self._lock:
             self._db.executemany("UPDATE item_events SET consumed_at = ? WHERE id = ?", [(now, i) for i in event_ids])
 
+    def apply_attempts(self, scenario: str, key: str, what: str | None, version: str | None) -> tuple[int, int]:
+        """(ok, failed) runs of the apply hook for an `apply` decision on this item and version."""
+        rows = self._all("SELECT name, COUNT(*) AS n FROM item_events WHERE scenario = ? AND key = ? AND kind = 'apply' "
+                         "AND json_extract(data, '$.source') = 'decision' AND json_extract(data, '$.step') IS ? "
+                         "AND json_extract(data, '$.version') IS ? GROUP BY name", scenario, key, what, version)
+        counts = {r["name"]: r["n"] for r in rows}
+        return counts.get("ok", 0), counts.get("failed", 0)
+
     def item_events(self, scenario: str, key: str, limit: int = 50) -> list[dict]:
         return [_event(r) for r in self._all("SELECT * FROM item_events WHERE scenario = ? AND key = ? "
                                              "ORDER BY id DESC LIMIT ?", scenario, key, limit)]

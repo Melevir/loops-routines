@@ -54,9 +54,10 @@ class Active:
 
 @dataclass
 class Question:
-    """An agent's question waiting for a click: in the dialog, the web page, the CLI or MCP, whichever is first."""
+    """A question waiting for a click, from an agent (run_id) or a scenario's `ask` for an item (item): in the
+    dialog, the web page, the CLI or MCP, whichever is first."""
     id: int
-    run_id: int
+    run_id: int | None
     routine: str
     title: str
     text: str
@@ -65,10 +66,13 @@ class Question:
     deadline: str
     future: asyncio.Future
     dialog: asyncio.Task | None = None
+    item: tuple[str, str] | None = None  # (scenario, key)
+    via: str = ""  # how it was closed
 
     def view(self) -> dict:
         return {"id": self.id, "run_id": self.run_id, "routine": self.routine, "title": self.title,
-                "question": self.text, "buttons": self.buttons, "asked_at": self.asked_at, "deadline": self.deadline}
+                "question": self.text, "buttons": self.buttons, "asked_at": self.asked_at, "deadline": self.deadline,
+                **({"scenario": self.item[0], "key": self.item[1]} if self.item else {})}
 
 
 class EventBus:
@@ -728,25 +732,38 @@ class Service:
         if not self.cfg.notify.enabled:
             return {"status": "unavailable", "answer": None,
                     "note": "notifications are off: decide on your own and say so in your report"}
-        self._question_seq += 1
-        now = self._now()
-        q = Question(self._question_seq, run_id, active.routine.name, active.routine.title, question, buttons,
-                     clock.to_iso(now), clock.to_iso(now + timedelta(minutes=minutes)),
-                     asyncio.get_running_loop().create_future())
-        self.questions[q.id] = q
-        self.store.put_message(run_id, f"question-{q.id}", "question", question[:MAX_TEXT], clock.utc_now(),
-                               report={"question_id": q.id, "buttons": buttons, "status": "waiting",
-                                       "deadline": q.deadline})
-        self.bus.publish("question.asked", q.view())
-        q.dialog = self._spawn(self._dialog(q, minutes * 60))
-        try:
-            answer = await asyncio.wait_for(asyncio.shield(q.future), minutes * 60 + 5)
-        except TimeoutError:
-            answer = Answer("timed_out")
-            self._close_question(q, answer, "nobody answered in time")
+        q = self.open_question(active.routine.name, active.routine.title, question, buttons, minutes, run_id=run_id)
+        answer = await self.wait_answer(q, minutes)
         return {"status": answer.status, "answer": answer.answer,
                 **({"note": "no answer: take the safe path and say so in your report"}
                    if answer.status != "answered" else {})}
+
+    def open_question(self, routine: str, title: str, text: str, buttons: list[str], minutes: int, *,
+                      run_id: int | None = None, item: tuple[str, str] | None = None) -> Question:
+        """A question for an agent's run or a scenario's item: the dialog opens (when notifications are on) and
+        any channel may answer; wait_answer waits for it."""
+        self._question_seq += 1
+        now = self._now()
+        q = Question(self._question_seq, run_id, routine, title, text, buttons, clock.to_iso(now),
+                     clock.to_iso(now + timedelta(minutes=minutes)), asyncio.get_running_loop().create_future(),
+                     item=item)
+        self.questions[q.id] = q
+        if run_id is not None:
+            self.store.put_message(run_id, f"question-{q.id}", "question", text[:MAX_TEXT], clock.utc_now(),
+                                   report={"question_id": q.id, "buttons": buttons, "status": "waiting",
+                                           "deadline": q.deadline})
+        self.bus.publish("question.asked", q.view())
+        if self.cfg.notify.enabled:
+            q.dialog = self._spawn(self._dialog(q, minutes * 60))
+        return q
+
+    async def wait_answer(self, q: Question, minutes: int) -> Answer:
+        try:
+            return await asyncio.wait_for(asyncio.shield(q.future), minutes * 60 + 5)
+        except TimeoutError:
+            answer = Answer("timed_out")
+            self._close_question(q, answer, "nobody answered in time")
+            return answer
 
     async def _dialog(self, q: Question, seconds: int) -> None:
         try:
@@ -756,22 +773,30 @@ class Service:
         except Exception as exc:
             answer = Answer("failed", error=str(exc)[:300])
         if answer.status == "failed":  # no dialog: the web page, the CLI and MCP can still answer
-            self.store.put_message(q.run_id, None, "notify", f"the question dialog could not open: {answer.error}"[:MAX_TEXT],
-                                   clock.utc_now(), report={"kind": "warning", "by": "daemon", "shown": False})
+            if q.run_id is not None:
+                self.store.put_message(q.run_id, None, "notify",
+                                       f"the question dialog could not open: {answer.error}"[:MAX_TEXT],
+                                       clock.utc_now(), report={"kind": "warning", "by": "daemon", "shown": False})
             return
         self._close_question(q, answer, "in the dialog")
 
     def _close_question(self, q: Question, answer: Answer, via: str) -> None:
         if q.future.done():
             return
+        q.via = via
         q.future.set_result(answer)
         self.questions.pop(q.id, None)
         if q.dialog and not q.dialog.done() and q.dialog is not asyncio.current_task():
             q.dialog.cancel()
-        self.store.put_message(q.run_id, f"question-{q.id}", "question", q.text[:MAX_TEXT], clock.utc_now(),
-                               report={"question_id": q.id, "buttons": q.buttons, "status": answer.status,
-                                       "answer": answer.answer, "via": via, "deadline": q.deadline})
-        self.bus.publish("question.closed", {**q.view(), "status": answer.status, "answer": answer.answer})
+        if q.run_id is not None:
+            self.store.put_message(q.run_id, f"question-{q.id}", "question", q.text[:MAX_TEXT], clock.utc_now(),
+                                   report={"question_id": q.id, "buttons": q.buttons, "status": answer.status,
+                                           "answer": answer.answer, "via": via, "deadline": q.deadline})
+        self.bus.publish("question.closed", {**q.view(), "status": answer.status, "answer": answer.answer,
+                                             "via": via})
+
+    def cancel_question(self, q: Question, via: str) -> None:
+        self._close_question(q, Answer("cancelled"), via)
 
     def pending_questions(self) -> list[dict]:
         return [q.view() for q in self.questions.values()]

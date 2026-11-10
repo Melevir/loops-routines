@@ -5,9 +5,10 @@ A scenario is a folder, ~/.loops_routines/scenarios/<name>/:
     scenario.toml   title, how often `select` runs, limits, step defaults, settings (+ their schema)
     select          executable: JSON in on stdin (items, their state, events), JSON out (one decision each)
     steps/*.md      the agent steps: a routine header without a schedule, and a prompt
-    apply           executable, optional (used in a later version)
+    apply           executable, optional: a step's result (or an `apply` decision) in, writes to the world,
+                    a state patch out
 
-This module is pure apart from run_select: parsing, validation, the select contract and state merging.
+This module is pure apart from run_hook: parsing, validation, the select and apply contracts, state merging.
 The daemon side lives in loops_routines.scenario_engine.
 """
 
@@ -21,16 +22,16 @@ from datetime import timedelta
 from pathlib import Path
 
 from loops_routines.core.config import Config
+from loops_routines.core.notify import check_buttons
 from loops_routines.core.routines import STEP_KEYS, Routine, build_routine, read_header
 from loops_routines.core.triggers import fmt_duration, parse_duration
 
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 STEP_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-KNOWN_KEYS = {"title", "select_every", "select_timeout", "enabled", "max_items", "max_attempts", "defaults",
-              "settings"}
+KNOWN_KEYS = {"title", "select_every", "select_timeout", "apply_timeout", "enabled", "max_items", "max_attempts",
+              "defaults", "settings"}
 SCHEMA_TYPES = {"int": int, "float": (int, float), "str": str, "bool": bool, "list": list}
 ACTIONS = ("run", "apply", "wait", "notify", "ask", "done")
-LATER_ACTIONS = {"apply": "apply hooks", "ask": "questions"}  # not executed yet
 NOTICE_KINDS = ("info", "success", "warning", "error")
 MIN_SELECT_EVERY = 60
 MAX_KEY = 200
@@ -57,6 +58,7 @@ class Scenario:
     has_apply: bool
     problems: tuple[str, ...] = ()  # usable, but worth a look
     specs: dict = field(default_factory=dict, compare=False)  # step -> Routine (when parsed with a config)
+    apply_timeout: int = 120  # seconds
 
     @property
     def select_path(self) -> Path:
@@ -105,6 +107,9 @@ def parse_scenario(folder: Path, cfg: Config | None = None) -> Scenario:
     timeout = _duration(raw, "select_timeout", "60s")
     if not 1 <= timeout <= 600:
         raise ValueError("select_timeout must be 1s..10m")
+    apply_timeout = _duration(raw, "apply_timeout", "2m")
+    if not 1 <= apply_timeout <= 600:
+        raise ValueError("apply_timeout must be 1s..10m")
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ValueError("enabled must be true or false")
@@ -146,7 +151,7 @@ def parse_scenario(folder: Path, cfg: Config | None = None) -> Scenario:
     return Scenario(name=name, title=title, path=str(folder), select_every=every, select_timeout=timeout,
                     enabled=enabled, max_items=max_items, max_attempts=max_attempts, defaults=defaults,
                     settings=settings, schema=schema, steps=tuple(steps), has_apply=apply.is_file(),
-                    problems=tuple(problems), specs=specs)
+                    problems=tuple(problems), specs=specs, apply_timeout=apply_timeout)
 
 
 def parse_step(scenario: str, title: str, step: str, text: str, defaults: dict, cfg: Config, path: str = "") -> Routine:
@@ -244,15 +249,17 @@ class Decision:
     reason: str = ""
     title: str | None = None
     url: str | None = None
-    step: str | None = None
+    step: str | None = None  # run: the step; apply: what to apply ("merge"), handed to the apply hook
     version: str | None = None
     vars: dict = field(default_factory=dict)
     state: dict | None = None  # a patch for the item's state
     kind: str = "info"  # notify: the banner's level
-    name: str = ""  # notify: which notice this is ("yours", "stuck"); once_per counts per name
+    name: str = ""  # notify, ask: which notice or question this is; once_per counts per name
     text: str = ""  # notify, ask
-    once_per: str | None = None  # notify: sent once per this value (default: its text)
+    once_per: str | None = None  # notify, ask: sent once per this value (default: its text)
     buttons: list | None = None  # what a person may press on the item; None leaves them as they are
+    answers: list = field(default_factory=list)  # ask: the dialog's buttons (1-3)
+    timeout_minutes: int | None = None  # ask: how long the question stays open
 
 
 def parse_decisions(output: str, steps: tuple[str, ...]) -> tuple[list[Decision], list[str]]:
@@ -314,7 +321,17 @@ def _decision(raw, steps: tuple[str, ...]) -> Decision:
         if d.kind not in NOTICE_KINDS:
             raise ValueError(f"kind must be one of {', '.join(NOTICE_KINDS)}")
         d.once_per = _opt_text(raw, "once_per", 200)
-        d.name = _opt_text(raw, "name", 40) or d.kind
+        d.name = _opt_text(raw, "name", 40) or ("ask" if action == "ask" else d.kind)
+    if action == "ask":
+        answers = raw.get("answers")
+        if answers is not None and not isinstance(answers, list):
+            raise ValueError("answers must be a list of 1-3 button names")
+        d.answers = check_buttons(answers)
+        minutes = raw.get("timeout_minutes")
+        if minutes is not None and (not isinstance(minutes, int) or isinstance(minutes, bool)
+                                    or not 1 <= minutes <= 1440):
+            raise ValueError("timeout_minutes must be a whole number 1..1440")
+        d.timeout_minutes = minutes
     buttons = raw.get("buttons")
     if buttons is not None:
         if not isinstance(buttons, list) or len(buttons) > MAX_BUTTONS or \
@@ -353,19 +370,66 @@ def merge_state(state: dict, patch: dict | None) -> dict:
     return merged
 
 
-async def run_select(scenario: Scenario, payload: dict, env: dict | None = None, log=None) -> str:
-    """Run the scenario's select with payload as JSON on stdin; its stdout. ValueError on a failure, a
-    non-zero exit or the timeout (the process is killed). log: a file stderr goes to."""
-    proc = await asyncio.create_subprocess_exec(
-        str(scenario.select_path), cwd=scenario.path, env=env, stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+@dataclass
+class Applied:
+    """What the apply hook printed: a state patch, a notification, an error."""
+    state: dict | None = None
+    notify: str | None = None
+    kind: str = "info"
+    error: str | None = None
+
+
+def parse_applied(output: str) -> Applied:
+    """apply's stdout -> Applied. Nothing printed means it had nothing to say; ValueError when it's not the
+    contract: {"state": {...}, "notify": "text" or {"text", "kind"}, "error": "text"}, every key optional."""
+    if len(output.encode()) > MAX_STATE:
+        raise ValueError(f"apply printed more than {MAX_STATE // 1000} KB")
+    if not output.strip():
+        return Applied()
     try:
-        out, err = await asyncio.wait_for(proc.communicate(json.dumps(payload).encode()), scenario.select_timeout)
+        data = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"apply did not print JSON: {exc}") from None
+    if not isinstance(data, dict):
+        raise ValueError("apply must print a JSON object")
+    state = data.get("state")
+    if state is not None and not isinstance(state, dict):
+        raise ValueError("apply's state must be an object")
+    out = Applied(state=state)
+    notify = data.get("notify")
+    if isinstance(notify, dict):
+        out.kind = notify.get("kind", "info")
+        notify = notify.get("text")
+    if notify is not None:
+        if not isinstance(notify, str) or out.kind not in NOTICE_KINDS:
+            raise ValueError(f"apply's notify must be text or {{text, kind}} with kind one of {', '.join(NOTICE_KINDS)}")
+        out.notify = " ".join(notify.split())[:MAX_TEXT] or None
+    error = data.get("error")
+    if error is not None:
+        out.error = " ".join(str(error).split())[:500] or "apply reported an error"
+    return out
+
+
+async def run_select(scenario: Scenario, payload: dict, env: dict | None = None, log=None) -> str:
+    return await run_hook(scenario, "select", payload, scenario.select_timeout, env=env, log=log)
+
+
+async def run_hook(scenario: Scenario, what: str, payload: dict, timeout: int, env: dict | None = None,
+                   log=None) -> str:
+    """Run the scenario's `select` or `apply` with payload as JSON on stdin; its stdout. ValueError on a
+    failure, a non-zero exit or the timeout (the process is killed). log: a file stderr goes to."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(Path(scenario.path) / what), cwd=scenario.path, env=env, stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+    except OSError as exc:
+        raise ValueError(f"{what} could not start: {exc}") from None
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(json.dumps(payload).encode()), timeout)
     except TimeoutError:
         _kill(proc)
         await proc.wait()
-        took = fmt_duration(timedelta(seconds=scenario.select_timeout))
-        raise ValueError(f"select took longer than {took} and was stopped") from None
+        raise ValueError(f"{what} took longer than {fmt_duration(timedelta(seconds=timeout))} and was stopped") from None
     except asyncio.CancelledError:
         _kill(proc)
         raise
@@ -374,7 +438,7 @@ async def run_select(scenario: Scenario, payload: dict, env: dict | None = None,
         log.write(text if text.endswith("\n") else text + "\n")
     if proc.returncode:
         tail = " ".join(text.strip().splitlines()[-3:])[:300]
-        raise ValueError(f"select exited with {proc.returncode}" + (f": {tail}" if tail else ""))
+        raise ValueError(f"{what} exited with {proc.returncode}" + (f": {tail}" if tail else ""))
     return out.decode("utf-8", "replace")
 
 

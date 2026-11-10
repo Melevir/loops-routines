@@ -9,17 +9,22 @@ applied here:
 
     run      queue the step for the item; the daemon's tick starts it when a slot, the step's limits and
              the scenario's max_items allow, sharing the slots with the routines by priority
+    apply    run the scenario's apply hook for the item now, without an agent (a merge)
     wait     the item waits; its reason is shown
     notify   a macOS notification, once per (notice name, once_per)
+    ask      a question with 1-3 answers, once per (question name, once_per); the dialog, the CLI, MCP or
+             REST answer it, and the answer comes back as an `answer` event
     done     the item is no longer followed (it stays visible until it is pruned)
-    apply, ask   recorded and shown, not carried out yet
 
-Every decision may patch the item's state and set its title, url and buttons. While a step runs for an
-item, select's decisions for it only do that: the run is not interrupted.
+Every decision may patch the item's state and set its title, url and buttons. While a step or the apply
+hook runs for an item, select's decisions for it only do that: the run is not interrupted.
 
 A step runs once per (item, step, version) when it ends well (a result file); select gives a new version
 to run it again. A step that fails max_attempts times on the same version is not run again: the item is
-"stuck" and you get one notification.
+"stuck" and you get one notification. The same holds for an `apply` decision per (item, what, version).
+
+After a step ends well, the apply hook gets its result (the writes stay out of the agent's hands); its
+state patch is merged and an `apply` event tells the next select how it went.
 """
 
 import asyncio
@@ -33,7 +38,7 @@ from loops_routines.core import clock, paths
 from loops_routines.core.claude_cli import account_problem
 from loops_routines.core.routines import Routine
 from loops_routines.core.scenarios import (
-    LATER_ACTIONS,
+    Applied,
     BrokenScenario,
     Decision,
     Scenario,
@@ -41,7 +46,9 @@ from loops_routines.core.scenarios import (
     fingerprint,
     load_scenarios,
     merge_state,
+    parse_applied,
     parse_decisions,
+    run_hook,
     run_select,
 )
 from loops_routines.core.triggers import fmt_duration
@@ -52,6 +59,8 @@ from loops_routines.errors import Conflict, NotFound
 MAX_EVENTS_IN = 50  # per item, handed to one select
 MAX_ITEMS_IN = 500
 MAX_PREVIOUS_REPORT = 20_000
+MAX_APPLY_REPORT = 100_000  # of a step's report, handed to apply
+ASK_TIMEOUT_MINUTES = 24 * 60  # an item's question waits for a person this long unless select says otherwise
 
 
 @dataclass
@@ -71,6 +80,9 @@ class ScenarioEngine:
         self.broken: dict[str, BrokenScenario] = {}
         self._fingerprint = None
         self.tasks: dict[str, asyncio.Task] = {}
+        self.again: set[str] = set()  # scenarios to select again as soon as the current select ends
+        self.applying: set[tuple[str, str]] = set()  # (scenario, key) whose apply hook runs now
+        self.asking: dict[tuple[str, str], tuple] = {}  # (scenario, key) -> (Question, name, once_per)
         self.reload(force=True)
 
     def _iso(self) -> str:
@@ -118,6 +130,10 @@ class ScenarioEngine:
         return [(rid, a) for rid, a in self.s.active.items()
                 if a.item and a.item[0] == name and (key is None or a.item[1] == key)]
 
+    def busy(self, name: str, key: str) -> bool:
+        """A step or the apply hook runs for the item now: select's decisions don't interrupt it."""
+        return (name, key) in self.applying or bool(self.running(name, key))
+
     def spec_for(self, row: dict) -> Routine | None:
         """The step a run row belongs to, if its scenario and step still exist."""
         sc = self.scenarios.get(row.get("scenario") or "")
@@ -136,8 +152,10 @@ class ScenarioEngine:
                 self.start_select(sc.name)
 
     def start_select(self, name: str) -> bool:
-        """Run a scenario's select in the background; False if one is already going."""
+        """Run a scenario's select in the background; when one is already going (False), another runs right
+        after it, so what the caller saw (a press, an answer, a finished apply) is not left for the timer."""
         if self.selecting(name):
+            self.again.add(name)
             return False
         sc = self.scenario(name)
         self.tasks[name] = self.s._spawn(self._select(sc))
@@ -165,6 +183,8 @@ class ScenarioEngine:
                 "paused": item["paused"], "buttons": item["buttons"],
                 "last": {k: item[k] for k in ("action", "step", "reason", "version")},
                 "running": {"step": running[0][1].item[2], "run_id": running[0][0]} if running else None,
+                "applying": (sc.name, item["key"]) in self.applying,
+                "asking": self._asking_view(sc.name, item["key"]),
                 "runs": {step: _run_brief(r) for step, r in self.s.store.last_step_runs(sc.name, item["key"]).items()},
                 "events": by_key.get(item["key"], [])[-MAX_EVENTS_IN:],
             }
@@ -206,6 +226,11 @@ class ScenarioEngine:
             await self.s._banner(None, f"{sc.title}: select failed", error[:280], "error", by_daemon=True)
         self.s.bus.publish("scenario.selected", {"name": sc.name, "error": error, "decisions": len(decisions),
                                                  "problems": len(problems)})
+        if sc.name in self.again:
+            self.again.discard(sc.name)
+            current = self.scenarios.get(sc.name)
+            if current and self.enabled(current):
+                self.tasks[sc.name] = self.s._spawn(self._select(current))
 
     async def _apply(self, sc: Scenario, d: Decision, now: str) -> None:
         store = self.s.store
@@ -220,35 +245,43 @@ class ScenarioEngine:
             values["url"] = d.url
         if d.buttons is not None:
             values["buttons"] = d.buttons
-        if item and self.running(sc.name, d.key):  # a running step is not interrupted
+        if item and self.busy(sc.name, d.key):  # a running step or apply is not interrupted
             store.put_item(sc.name, d.key, now, **values)
             return
+        if d.action == "apply" and not sc.has_apply:
+            raise ValueError("apply: the scenario has no `apply` executable")
         values.update({"action": d.action, "step": d.step, "reason": d.reason, "version": d.version,
                        "vars": d.vars, "queue": None})
         paused = bool(item and item["paused"])
-        if d.action in LATER_ACTIONS:
-            what = f"{d.action} {d.step}" if d.step else d.action
-            values["reason"] = f"{d.reason} ({what} not carried out: {LATER_ACTIONS[d.action]} aren't supported yet)".lstrip()
+        start_apply = False
         if d.action == "done":
             values["done_at"], values["tracked"] = now, 0
         if paused:
             values["reason"] = f"paused · {values['reason']}"
-        elif d.action == "run":
-            values["queue"], stuck = self._run_block(sc, d.key, d.step, d.version)
-            values["queue"] = values["queue"] or "queued"
+        elif d.action in ("run", "apply"):
+            block = self._run_block if d.action == "run" else self._apply_block
+            values["queue"], stuck = block(sc, d.key, d.step, d.version)
+            start_apply = d.action == "apply" and values["queue"] is None
+            values["queue"] = values["queue"] or ("applying" if d.action == "apply" else "queued")
             if stuck:
                 values["action"], values["reason"] = "stuck", values["queue"]
                 await self._notice(sc, d.key, item, values, now, "stuck", values["queue"], "warning",
-                                   f"{d.step}@{d.version}")
+                                   f"{'' if d.action == 'run' else 'apply '}{d.step}@{d.version}")
         changed = not item or any(item.get(k) != values.get(k) for k in ("action", "step", "reason"))
         if d.action == "notify" and not paused:
             await self._notice(sc, d.key, item, values, now, d.name, d.text, d.kind, d.once_per or d.text)
+        if d.action == "ask" and not paused:
+            self._ask(sc, d, item, values)
         store.put_item(sc.name, d.key, now, **values)
+        if d.action != "ask":  # a question stays open while select keeps asking it
+            self._drop_question(sc.name, d.key, "the item is done" if d.action == "done" else "select no longer asks it")
         if changed:
             store.add_event(sc.name, d.key, "decision", now, d.action,
                             {"step": d.step, "reason": values["reason"], "version": d.version}, consumed=True)
             self.s.bus.publish("item.updated", {"scenario": sc.name, "key": d.key, "action": values["action"],
                                                 "reason": values["reason"]})
+        if start_apply:
+            self._start_apply(sc, d.key, what=d.step, version=d.version, vars=d.vars)
 
     async def _notice(self, sc: Scenario, key: str, item: dict | None, values: dict, now: str, name: str, text: str,
                       kind: str, once: str) -> None:
@@ -277,6 +310,167 @@ class ScenarioEngine:
             return f"stuck: {step} failed {failed} times{f' on version {version}' if version else ''}", True
         return None, False
 
+    def _apply_block(self, sc: Scenario, key: str, what: str | None, version: str | None) -> tuple[str | None, bool]:
+        """Why an `apply` decision is not carried out now: (reason or None, stuck)."""
+        ok, failed = self.s.store.apply_attempts(sc.name, key, what, version)
+        label = f"apply {what}" if what else "apply"
+        if ok:
+            return f"{label} already done for {f'version {version}' if version else 'this item'}", False
+        if failed >= sc.max_attempts:
+            return f"stuck: {label} failed {failed} times{f' on version {version}' if version else ''}", True
+        return None, False
+
+    # --- questions -----------------------------------------------------------------------------
+
+    def _ask(self, sc: Scenario, d: Decision, item: dict | None, values: dict) -> None:
+        """Open select's question for the item, once per (name, once_per): answered or timed out, it is not
+        asked again; a different question replaces an open one."""
+        ref = (sc.name, d.key)
+        once = d.once_per or d.text
+        if ref in self.asking:
+            q, name, asked = self.asking[ref]
+            if (name, asked) == (d.name, once):
+                return
+            self.s.cancel_question(q, "a new question replaced it")
+            self.asking.pop(ref, None)
+        notified = values.get("notified") or (item or {}).get("notified") or {}
+        if notified.get(f"ask:{d.name}") == once:
+            return
+        title = values.get("title") or (item or {}).get("title") or d.key
+        minutes = d.timeout_minutes or ASK_TIMEOUT_MINUTES
+        q = self.s.open_question(sc.name, f"{sc.title}: {title}"[:120], d.text, d.answers, minutes, item=ref)
+        self.asking[ref] = (q, d.name, once)
+        values["notice"] = f"asking: {d.text}"[:300]
+        self.s.store.add_event(sc.name, d.key, "ask", self._iso(), d.name,
+                               {"question_id": q.id, "text": d.text, "answers": d.answers}, consumed=True)
+        self.s._spawn(self._wait_answer(sc.name, d.key, q, d.name, once, minutes))
+
+    async def _wait_answer(self, name: str, key: str, q, question: str, once: str, minutes: int) -> None:
+        answer = await self.s.wait_answer(q, minutes)
+        if (self.asking.get((name, key)) or (None,))[0] is q:
+            self.asking.pop((name, key), None)
+        if answer.status == "cancelled":  # replaced, or the item is done: nobody waits for it
+            return
+        store = self.s.store
+        item = store.item(name, key)
+        if not item or item["done_at"]:
+            return
+        now = self._iso()
+        notified = {**(item["notified"] or {}), f"ask:{question}": once}
+        notice = f"{question}: {answer.answer}" if answer.answer else f"{question}: {answer.status.replace('_', ' ')}"
+        store.put_item(name, key, now, notified=notified, notice=notice[:300])
+        store.add_event(name, key, "answer", now, answer.answer,
+                        {"question": question, "status": answer.status, "via": q.via, "text": q.text})
+        self.s.bus.publish("item.updated", {"scenario": name, "key": key, "answer": answer.answer,
+                                            "status": answer.status})
+        sc = self.scenarios.get(name)
+        if sc and self.enabled(sc):
+            self.start_select(name)
+
+    def _drop_question(self, name: str, key: str, why: str) -> None:
+        open_ = self.asking.pop((name, key), None)
+        if open_:
+            self.s.cancel_question(open_[0], why)
+
+    def _asking_view(self, name: str, key: str) -> dict | None:
+        open_ = self.asking.get((name, key))
+        if not open_:
+            return None
+        q, question, _ = open_
+        return {"question_id": q.id, "name": question, "text": q.text, "answers": q.buttons, "deadline": q.deadline}
+
+    def answer(self, name: str, key: str, answer: str) -> dict:
+        """Answer the item's open question (as the dialog would): an `answer` event, and a select now."""
+        self.scenario(name)
+        self._item(name, key)
+        open_ = self.asking.get((name, key))
+        if not open_:
+            raise NotFound(f"{key} has no open question")
+        result = self.s.answer_question(open_[0].id, answer)
+        return {"scenario": name, "key": key, **result}
+
+    # --- the apply hook ------------------------------------------------------------------------
+
+    def _start_apply(self, sc: Scenario, key: str, *, what: str | None, version: str | None, vars: dict) -> None:
+        """An `apply` decision: the hook runs in the background; the item is busy until it ends."""
+        ref = (sc.name, key)
+        self.applying.add(ref)
+
+        async def go() -> None:
+            try:
+                await self._run_apply(sc, key, source="decision", what=what, version=version, vars=vars)
+            except Exception:
+                traceback.print_exc()
+            finally:
+                self.applying.discard(ref)
+            if self.enabled(sc):
+                self.start_select(sc.name)
+        self.s._spawn(go())
+
+    async def _run_apply(self, sc: Scenario, key: str, *, source: str, what: str | None, version: str | None,
+                         vars: dict, run: dict | None = None) -> None:
+        """Run the apply hook for an item (after a step's run, or for an `apply` decision); merge its state
+        patch, show its notification, and leave an `apply` event (ok / failed) for the next select."""
+        store = self.s.store
+        item = store.item(sc.name, key)
+        if not item:
+            return
+        now = self._iso()
+        result = None
+        if run is not None:
+            report = run.get("report") or ""
+            result = {"run_id": run["id"], "outcome": run["outcome"], "status": run["status"],
+                      "summary": run["summary"], "report": report[:MAX_APPLY_REPORT], "data": run["data"]}
+        payload = {"scenario": sc.name, "now": now, "settings": sc.settings, "source": source, "step": what,
+                   "version": version, "vars": vars or {},
+                   "item": {"key": key, "title": item["title"], "url": item["url"], "state": item["state"]},
+                   "result": result}
+        env = {**os.environ, "LOOPS_ROUTINES_SCENARIO": sc.name, "LOOPS_ROUTINES_STATE": str(paths.state_dir())}
+        log_path = paths.log_dir() / f"scenario-{sc.name}.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as log:
+                log.write(f"--- {now} apply {what or ''} for {key}\n")
+                applied = parse_applied(await run_hook(sc, "apply", payload, sc.apply_timeout, env=env, log=log))
+        except (ValueError, OSError) as exc:
+            applied = Applied(error=str(exc)[:500])
+        item = store.item(sc.name, key)  # again: it may have changed while the hook ran
+        if not item:
+            return
+        now = self._iso()
+        values: dict = {}
+        try:
+            values["state"] = merge_state(item["state"], applied.state)
+        except ValueError as exc:
+            applied.error = applied.error or str(exc)
+        label = f"apply {what}" if what else "apply"
+        mine = source == "decision" and (item["action"], item["step"], item["version"]) == ("apply", what, version)
+        if mine:
+            values["queue"] = None
+            values["reason"] = f"{label}: {applied.error or 'done'}"[:280]
+            if not applied.error:
+                values["action"] = "applied"
+        store.add_event(sc.name, key, "apply", now, "failed" if applied.error else "ok", {
+            "source": source, "step": what, "version": version, "run_id": run["id"] if run else None,
+            "error": applied.error, "notify": applied.notify})
+        if applied.notify:
+            title = item["title"] or key
+            shown = await self.s._banner(None, f"{sc.title}: {title}"[:120], applied.notify, applied.kind, by_daemon=True)
+            values["notice"] = f"apply: {applied.notify}"[:300]
+            store.add_event(sc.name, key, "notice", now, "apply",
+                            {"text": applied.notify, "kind": applied.kind, "shown": shown.get("shown")}, consumed=True)
+        if applied.error:
+            if mine:
+                ok, failed = store.apply_attempts(sc.name, key, what, version)
+                if not ok and failed >= sc.max_attempts:
+                    values["action"] = "stuck"
+                    values["reason"] = f"stuck: {label} failed {failed} times: {applied.error}"[:280]
+            await self._notice(sc, key, item, values, now, "apply", f"{label} failed: {applied.error}", "warning",
+                               f"{source}:{what}@{version}")
+        store.put_item(sc.name, key, now, **values)
+        self.s.bus.publish("item.updated", {"scenario": sc.name, "key": key, "apply": what,
+                                            "ok": applied.error is None})
+
     # --- running steps -----------------------------------------------------------------------
 
     def _queue(self, sc: Scenario, item: dict, note: str) -> None:
@@ -293,7 +487,7 @@ class ScenarioEngine:
         for sc in self.scenarios.values():
             enabled = self.enabled(sc)
             for item in self.s.store.items(sc.name):
-                if item["action"] != "run" or item["paused"] or self.running(sc.name, item["key"]):
+                if item["action"] != "run" or item["paused"] or self.busy(sc.name, item["key"]):
                     continue
                 if not enabled:
                     self._queue(sc, item, "the scenario is off")
@@ -357,7 +551,8 @@ class ScenarioEngine:
 
     async def run_finished(self, item_ref: tuple, run: dict) -> None:
         """A step's run ended: the next select sees it (once, as a `run` event) and starts now. A step that
-        failed max_attempts times on this version makes the item stuck."""
+        failed max_attempts times on this version makes the item stuck. A step that ended well goes to the
+        apply hook first, when the scenario has one."""
         name, key, step, version = item_ref
         now = self._iso()
         store = self.s.store
@@ -380,6 +575,13 @@ class ScenarioEngine:
         store.put_item(name, key, now, **values)
         self.s.bus.publish("item.updated", {"scenario": name, "key": key, "action": values.get("action", item["action"]),
                                             "run_id": run["id"]})
+        if run["outcome"] == "ok" and sc.has_apply:
+            self.applying.add((name, key))
+            try:
+                await self._run_apply(sc, key, source="step", what=step, version=version,
+                                      vars=item["vars"] if item["step"] == step else {}, run=run)
+            finally:
+                self.applying.discard((name, key))
         if self.enabled(sc):
             self.start_select(name)
 
@@ -392,6 +594,8 @@ class ScenarioEngine:
         self._item(name, key)
         if self.running(name, key):
             raise Conflict(f"{key} already has a step running")
+        if (name, key) in self.applying:
+            raise Conflict(f"the apply hook is running for {key}")
         if len(self.s.active) >= self.s.cfg.daemon.max_parallel:
             raise Conflict(f"all {self.s.cfg.daemon.max_parallel} slots are busy")
         if problem := account_problem(self.s.cfg.agent):
@@ -481,7 +685,9 @@ class ScenarioEngine:
 
     def _item_view(self, item: dict) -> dict:
         running = self.running(item["scenario"], item["key"])
-        return {**_item_view(item), "running_run_id": running[0][0] if running else None}
+        return {**_item_view(item), "running_run_id": running[0][0] if running else None,
+                "applying": (item["scenario"], item["key"]) in self.applying,
+                "question": self._asking_view(item["scenario"], item["key"])}
 
     def _item(self, name: str, key: str) -> dict:
         item = self.s.store.item(name, key)
@@ -524,6 +730,7 @@ class ScenarioEngine:
         now = self._iso()
         for _, active in self.running(name, key):
             active.run.stop()
+        self._drop_question(name, key, "the item was untracked")
         self.s.store.put_item(name, key, now, tracked=0, done_at=now, action="done", reason="untracked", queue=None)
         self.s.store.add_event(name, key, "track", now, "untrack", consumed=True)
         self.s.bus.publish("item.updated", {"scenario": name, "key": key, "action": "done", "reason": "untracked"})

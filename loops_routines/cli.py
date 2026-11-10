@@ -31,6 +31,7 @@
     loops-routines scenario track NAME KEY [--title T] [--url U]   follow an item
     loops-routines scenario untrack NAME KEY            stop following it
     loops-routines scenario press NAME KEY BUTTON       press one of the item's buttons
+    loops-routines scenario answer NAME KEY ANSWER      answer the item's open question
     loops-routines scenario pause|resume NAME KEY       nothing is done for a paused item
     loops-routines scenario run NAME KEY STEP [--force] start a step for the item now
     loops-routines scenario step NAME STEP on|off|reset switch one step on / off / back to its file
@@ -142,6 +143,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("name")
     p.add_argument("key")
     p.add_argument("button", nargs="+")
+    p = sc.add_parser("answer")
+    p.add_argument("name")
+    p.add_argument("key")
+    p.add_argument("answer", nargs="+")
     p = sc.add_parser("run")
     p.add_argument("name")
     p.add_argument("key")
@@ -285,7 +290,8 @@ def _render(command: str, result) -> None:
         return
     if command == "questions":
         for q in result:
-            print(f"#{q['id']}  {q['title']} (run {q['run_id']}), until {_local(q['deadline'])}: {q['question']}")
+            whose = f"run {q['run_id']}" if q.get("run_id") is not None else f"{q.get('scenario')}: {q.get('key')}"
+            print(f"#{q['id']}  {q['title']} ({whose}), until {_local(q['deadline'])}: {q['question']}")
             print(f"     answer: loops-routines answer {q['id']} {' | '.join(q['buttons'])}")
         if not result:
             print("no open questions")
@@ -331,6 +337,7 @@ def _scenario(client: Client, args) -> None:
         "track": lambda: client.post(f"{base}/items", {"key": key, "title": args.title, "url": args.url}),
         "untrack": lambda: client.post(f"{base}/item/untrack", {"key": key}),
         "press": lambda: client.post(f"{base}/item/press", {"key": key, "button": " ".join(args.button)}),
+        "answer": lambda: client.post(f"{base}/item/answer", {"key": key, "answer": " ".join(args.answer)}),
         "pause": lambda: client.post(f"{base}/item/pause", {"key": key, "paused": True}),
         "resume": lambda: client.post(f"{base}/item/pause", {"key": key, "paused": False}),
         "run": lambda: client.post(f"{base}/item/run", {"key": key, "step": args.step, "force": args.force}),
@@ -364,6 +371,9 @@ def _scenario(client: Client, args) -> None:
     if command == "press":
         print(f"pressed {result['pressed']} on {result['key']}: its select runs now")
         return
+    if command == "answer":
+        print(f"answered {result['answer']} on {result['key']}: its select runs now")
+        return
     print(_item_line(result))
 
 
@@ -381,7 +391,9 @@ def _item_line(i: dict) -> str:
                                             ("done", i.get("done_at"))) if on)
     buttons = f"  buttons: {' | '.join(i['buttons'])}" if i.get("buttons") else ""
     queue = f" · {i['queue']}" if i.get("queue") else ""
-    return f"{i['key']:<28} {what:<16} {i.get('reason') or ''}{queue}{flags}{buttons}"[:240]
+    q = i.get("question")
+    question = f"  asks: {q['text']} ({' | '.join(q['answers'])})" if q else ""
+    return f"{i['key']:<28} {what:<16} {i.get('reason') or ''}{queue}{flags}{buttons}{question}"[:300]
 
 
 def _check_scenario(folder: str) -> None:

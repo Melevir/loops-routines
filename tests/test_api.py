@@ -63,6 +63,22 @@ def test_routines_and_errors(client):
     assert client.post("/api/notify/test", headers=AUTH, json={"kind": "loud"}).status_code == 400
 
 
+def test_an_items_question_through_the_api(client):
+    from test_scenarios import make_scenario
+    make_scenario(decisions=[{"key": "o/r#1", "action": "ask", "text": "Merge now?", "answers": ["Merge", "Wait"]}])
+    client.service.notifier.block = True
+    client.post("/api/reload", headers=AUTH)
+    assert client.post("/api/scenarios/toy/select", headers=AUTH).status_code == 200
+    [q] = client.get("/api/questions", headers=AUTH).json()
+    assert (q["scenario"], q["key"], q["question"]) == ("toy", "o/r#1", "Merge now?")
+    item = client.get("/api/scenarios/toy/item", headers=AUTH, params={"key": "o/r#1"}).json()
+    assert item["question"]["answers"] == ["Merge", "Wait"]
+    bad = client.post("/api/scenarios/toy/item/answer", headers=AUTH, json={"key": "o/r#1", "answer": "Never"})
+    assert bad.status_code == 400
+    answer = client.post("/api/scenarios/toy/item/answer", headers=AUTH, json={"key": "o/r#1", "answer": "wait"})
+    assert answer.json()["answer"] == "Wait" and client.get("/api/questions", headers=AUTH).json() == []
+
+
 def test_run_through_the_api(client):
     run_id = client.post("/api/routines/mon/run", headers=AUTH, json={}).json()["run_id"]
     assert client.post("/api/routines/mon/run", headers=AUTH, json={}).status_code in (200, 409)
